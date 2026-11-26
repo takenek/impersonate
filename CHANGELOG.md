@@ -61,6 +61,8 @@ ownCloud 10 is not supported. Upgrade from 0.x: replace the app folder and run `
 - The impersonation banner link is clickable again, the markup is valid and user names are no longer
   double escaped; the column header and the icon tooltip are translatable.
 - Uses `OCP\IConfig::getAppValue()` instead of the deprecated `OCP\IAppConfig::getValue()`.
+- The templates are compiled with handlebars 4.7.10, the runtime version of ownCloud 11.1; the
+  lockfile fetches from the npm registry over HTTPS only.
 - `make dist` builds a reproducible `build/impersonate-<version>.tar.gz` (+ `.sha256`) whose folder is
   named after the app id (required by the ownCloud 11.1 installer); signing uses an optional
   `SIGN_CMD` because `occ integrity:sign-app` was removed in ownCloud 11.
