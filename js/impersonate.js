@@ -1,3 +1,9 @@
+/**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Modified on 2026-11-26 by Marek Królikowski (TaKeN), see CHANGELOG.md.
+ * Based on the ownCloud "impersonate" app, Copyright (C) 2015-2023 ownCloud GmbH and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only - see LICENSE and COPYRIGHT.
+ */
 (function(){
 	function getDataForApp() {
 		return $.get(
@@ -23,104 +29,128 @@
 		$($html).insertAfter($localtr.find('.name'));
 	}
 
-	var includedGroups,
-	groupEnabled,
-	adminUser,
-	subadminUser, subAdminFullAccess;
+	function parseFlag(value) {
+		if (typeof value === 'boolean') {
+			return value;
+		}
+		try {
+			return JSON.parse($.trim(String(value))) === true;
+		} catch (e) {
+			return false;
+		}
+	}
+
+	function parseGroups(value) {
+		try {
+			var groups = JSON.parse(value);
+			return _.isArray(groups) ? _.map(groups, function(g) { return $.trim(String(g)); }) : [];
+		} catch (e) {
+			return [];
+		}
+	}
+
+	/**
+	 * Mirrors the server side rules (OCA\Impersonate\Policy); the server
+	 * still checks every request.
+	 */
+	function canImpersonate(user, groupsOfUser, data) {
+		if (!user || user.name === currentUser) {
+			return false;
+		}
+		if (user.isEnabled === false || user.lastLogin === 0) {
+			return false;
+		}
+		if (data.isAdmin) {
+			return true;
+		}
+		// group admins can not impersonate administrators (the server only sends
+		// the admins that are members of the group admin's groups)
+		if (!data.isGroupAdmin || _.contains(data.adminUids, user.name)) {
+			return false;
+		}
+		// the server only sends the groups this group admin may impersonate in
+		return _.intersection(data.includedGroups, groupsOfUser).length > 0;
+	}
 
 	var currentUser = OC.getCurrentUser().uid;
 
 	OC.Plugins.register('OC.Settings.UserList', {
 		attach: function (obj) {
 			var $newColumn = $("#userlist").find("tr:first-child");
-			$('<th id="impersonateId" scope="col">Impersonate</th>').insertAfter($newColumn.find("#headerName"));
+			$('<th id="impersonateId" scope="col"></th>')
+				.text(t('impersonate', 'Impersonate'))
+				.insertAfter($newColumn.find("#headerName"));
 			//Obj is UserList
 			var oldAdd = obj.add;
-			obj.add = function () {
+			obj.add = function (user) {
 				var $tr = oldAdd.apply(this, arguments);
+				if (!$tr) {
+					return $tr;
+				}
 				promiseGetData.then(function (result) {
-					includedGroups = $.parseJSON(result[0]);
-					groupEnabled = JSON.parse($.trim(result[1]));
-					subAdminFullAccess = JSON.parse($.trim(result[2]));
-					adminUser = JSON.parse($.trim(result[3]));
-					subadminUser = JSON.parse($.trim(result[4]));
-					if (!$tr) {
-						return;
-					}
+					var data = {
+						includedGroups: parseGroups(result[0]),
+						includeGroupsMode: parseFlag(result[1]),
+						allGroupAdminsMode: parseFlag(result[2]),
+						isAdmin: parseFlag(result[3]),
+						isGroupAdmin: parseFlag(result[4]),
+						adminUids: parseGroups(result[5] || '[]')
+					};
 
 					//Clean up of impersonation
 					$tr.find('.impersonate').parent().remove();
 					$tr.find('.impersonateDisabled').remove();
 
-					var groupsSelectedByUser = $tr.find('.groups').data('groups');
-					if (!_.isArray(groupsSelectedByUser)) {
+					var groupsOfUser = $tr.find('.groups').data('groups');
+					if (!_.isArray(groupsOfUser)) {
 						// We need the gid.
-						// For older OC versions (10.13-), the "groupsSelectedByUser"
+						// For older OC versions (10.13-), the "groupsOfUser"
 						// is an array containing groups. For newer OC versions (10.13+)
 						// it maps each gid with additional data such as displayname, so
 						// we need to extract the keys of the map
-						groupsSelectedByUser = _.keys(groupsSelectedByUser);
+						groupsOfUser = _.keys(groupsOfUser || {});
 					}
 
-					if ($tr.data('uid') === $.trim(currentUser)) {
-						removeImpersonateIcon($tr);
-					} else if (adminUser) {
+					if (canImpersonate(user, groupsOfUser, data)) {
 						addImpersonateIcon($tr);
-
-					} else if (subadminUser) {
-						if (subAdminFullAccess) {
-							addImpersonateIcon($tr);
-						} else {
-							var found = false;
-							if (groupEnabled) {
-								for (var i = 0; i < includedGroups.length; i++) {
-									if ($.inArray($.trim(includedGroups[i]), groupsSelectedByUser) !== -1) {
-										found = true;
-										addImpersonateIcon($tr);
-										break;
-									}
-								}
-							} else {
-								addImpersonateIcon($tr);
-								found = true;
-							}
-							if (found === false) {
-								removeImpersonateIcon($tr);
-							}
-						}
+					} else {
+						removeImpersonateIcon($tr);
 					}
-					return $tr;
 				});
+				return $tr;
 			};
 		}
 	});
 
 	$(document).ready(function () {
+		var pending = false;
+
 		function impersonate(target) {
-			var currentUser = OC.getCurrentUser().uid;
+			// the session id changes when the impersonation starts: never send twice
+			if (pending) {
+				return;
+			}
+			pending = true;
 			$.post(
 				OC.generateUrl('apps/impersonate/user'),
 				{ target: target }
-			).done(function( result ) {
+			).done(function() {
 				OC.redirect(OC.generateUrl(''));
-			}).fail(function( result ) {
-				if((result.responseJSON.error === "userNeverLoggedIn") && (result.responseJSON.message.length > 0)) {
-					OC.dialogs.alert(result.responseJSON.message, t('impersonate', "Error"));
-				} else if((result.responseJSON.error === "userNotFound") && (result.responseJSON.message.length > 0)){
-					OC.dialogs.alert(result.responseJSON.message, t('impersonate', "Error"));
-				} else if((result.responseJSON.error === "cannotImpersonate") && (result.responseJSON.message.length > 0)){
-					OC.dialogs.alert(result.responseJSON.message, t('impersonate', "Error"));
-				} else if ((result.responseJSON.error === "cannotImpersonateAdminUser") && (result.responseJSON.message.length > 0)) {
-					OC.dialogs.alert(result.responseJSON.message, t('impersonate', "Error"));
-				} else if ((result.responseJSON.error === "stopNestedImpersonation") && (result.responseJSON.message.length > 0)) {
-					OC.dialogs.alert(result.responseJSON.message, t('impersonate', "Error"));
-				}
+			}).fail(function(xhr) {
+				pending = false;
+				var response = (xhr && xhr.responseJSON) || {};
+				var message = response.message || t('impersonate', 'Can not impersonate');
+				OC.dialogs.alert(message, t('impersonate', 'Error'));
 			});
 		}
 
-		$('#userlist').on('click', '.impersonate', function() {
-			var target = $(this).parents('tr').find('.name').text();
-			impersonate(target);
+		$('#userlist').on('click', '.impersonate', function(event) {
+			event.preventDefault();
+			var $tr = $(this).closest('tr');
+			var target = $tr.data('uid') || $.trim($tr.find('.name').text());
+			if (target) {
+				impersonate(target);
+			}
 		});
 
 	});

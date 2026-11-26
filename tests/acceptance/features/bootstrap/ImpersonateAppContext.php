@@ -1,5 +1,13 @@
 <?php declare(strict_types = 1);
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
+ * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
+ * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * See LICENSE and COPYRIGHT.
+ *
+ * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
+ *
  * ownCloud
  *
  * @author Kiran Adhikari <kiran.adhikari@jankaritech>
@@ -22,11 +30,11 @@
  */
 
 use Behat\Behat\Context\Context;
+use Behat\Behat\Hook\Scope\AfterScenarioScope;
 use Behat\Behat\Hook\Scope\BeforeScenarioScope;
 use Behat\Gherkin\Node\TableNode;
 use TestHelpers\SetupHelper;
 use TestHelpers\HttpRequestHelper;
-use GuzzleHttp\Client;
 
 require_once 'bootstrap.php';
 
@@ -35,7 +43,7 @@ require_once 'bootstrap.php';
  */
 class ImpersonateAppContext implements Context {
 	private FeatureContext $featureContext;
-	private int $impersonateResponseCode;
+	private bool $subadminFeatureChanged = false;
 
 	/**
 	 * Returns base url for the impersonate app
@@ -47,15 +55,6 @@ class ImpersonateAppContext implements Context {
 	}
 
 	/**
-	 * Reset the response code
-	 *
-	 * @return void
-	 */
-	public function resetImpersonateResponseCode(): void {
-		$this->impersonateResponseCode = null;
-	}
-
-	/**
 	 * Get the commands to obtain desired configuration
 	 *
 	 * @param string $option
@@ -64,25 +63,51 @@ class ImpersonateAppContext implements Context {
 	 * @throws Exception
 	 */
 	public function getOccCommandsForImpersonateOption(string $option, ?string $value = ""): array {
-		$commandsArray = [
-			"allow only an admin" => "config:app:set impersonate impersonate_all_groupadmins --value false",
-			"allow all group admins" => "config:app:set impersonate impersonate_include_groups --value false",
-			"only group admins of specific groups" => "config:app:set impersonate impersonate_include_groups_list --value '[]'"
-		];
-		if (!isset($commandsArray[$option])) {
-			throw new Exception("Invalid option");
+		// mirror what js/settings-admin.js stores for each radio button
+		$set = static function (string $key, string $val): string {
+			return "config:app:set impersonate $key --value $val";
+		};
+		switch ($option) {
+			case "allow only an admin":
+				return [
+					$set('impersonate_all_groupadmins', 'false'),
+					$set('impersonate_include_groups', 'false'),
+					$set('impersonate_include_groups_list', "'[]'"),
+				];
+			case "allow all group admins":
+				return [
+					$set('impersonate_all_groupadmins', 'true'),
+					$set('impersonate_include_groups', 'false'),
+					$set('impersonate_include_groups_list', "'[]'"),
+				];
+			case "only group admins of specific groups":
+				$groups = \array_values(\array_filter(\array_map('trim', \explode(',', (string)$value)), 'strlen'));
+				return [
+					$set('impersonate_include_groups', 'true'),
+					$set('impersonate_all_groupadmins', 'false'),
+					$set('impersonate_include_groups_list', "'" . \json_encode($groups) . "'"),
+				];
+			default:
+				throw new Exception("Invalid option");
 		}
+	}
 
-		if ($option === "allow all group admins") {
-			$commandsArray[$option] = "config:app:set impersonate impersonate_all_groupadmins --value true";
+	/**
+	 * Run an occ command and fail when it does not succeed
+	 *
+	 * @param string $command
+	 * @param array|null $env
+	 *
+	 * @return void
+	 * @throws Exception
+	 */
+	private function runOccOrFail(string $command, ?array $env = null): void {
+		$code = $this->featureContext->runOccWithEnvVariables([$command], $env);
+		if ($code !== 0) {
+			throw new Exception(
+				"occ command '$command' failed with exit code $code: " . $this->featureContext->getStdErrOfOccCommand()
+			);
 		}
-
-		if ($option === "only group admins of specific groups") {
-			$string = "\"".implode("\",\"", (explode(", ", $value)))."\"";
-			$commandsArray[$option] = "config:app:set impersonate impersonate_include_groups_list --value '[$string]'";
-		}
-
-		return $commandsArray;
 	}
 
 	/**
@@ -97,10 +122,8 @@ class ImpersonateAppContext implements Context {
 	public function createUserWithGroup(string $username, string $password, string $group): void {
 		$user = $this->featureContext->getActualUsername($username);
 		$actualPassword = $this->featureContext->getActualPassword($password);
-		$cmd = "user:add $user  --password-from-env --group=$group";
-		$args = [$cmd];
-		$this->featureContext->runOccWithEnvVariables(
-			$args,
+		$this->runOccOrFail(
+			"user:add $user --password-from-env --group=$group",
 			['OC_PASS' => $actualPassword]
 		);
 
@@ -149,13 +172,26 @@ class ImpersonateAppContext implements Context {
 	 * @throws Exception
 	 */
 	public function setImpersonateSettings(string $option, ?string $value = ""): void {
-		$occCommandsArray = $this->getOccCommandsForImpersonateOption($option, $value);
-		foreach ($occCommandsArray as $occCommand) {
-			$args = [$occCommand];
-			$this->featureContext->runOccWithEnvVariables(
-				$args,
-			);
+		foreach ($this->getOccCommandsForImpersonateOption($option, $value) as $occCommand) {
+			$this->runOccOrFail($occCommand);
 		}
+	}
+
+	/**
+	 * ownCloud 11 disables the group admin (subadmin) feature unless the
+	 * system config "allow_subadmins" is true.
+	 *
+	 * @Given /^the group admin feature has been (enabled|disabled)$/
+	 *
+	 * @param string $state
+	 *
+	 * @return void
+	 * @throws Exception
+	 */
+	public function theGroupAdminFeatureHasBeen(string $state): void {
+		$value = $state === 'enabled' ? 'true' : 'false';
+		$this->runOccOrFail("config:system:set allow_subadmins --value $value --type boolean");
+		$this->subadminFeatureChanged = true;
 	}
 
 	/**
@@ -178,27 +214,31 @@ class ImpersonateAppContext implements Context {
 			$userName = $this->featureContext->getActualUsername($requester);
 			$password = $this->featureContext->getActualPassword($requester);
 		}
-		try {
-			$response= HttpRequestHelper::post($this->featureContext->getBaseUrl().$this->getImpersonateUrl(), '', $userName, $password, null, $requestData);
-		} catch (Exception $e) {
-			$response = $e->getResponse();
-		} finally {
-			$this->featureContext->setResponse($response);
-		}
+		// HttpRequestHelper returns the response for HTTP error codes as well
+		$response = HttpRequestHelper::post(
+			$this->featureContext->getBaseUrl() . $this->getImpersonateUrl(),
+			'',
+			$userName,
+			$password,
+			null,
+			$requestData
+		);
+		$this->featureContext->setResponse($response);
 	}
 
 	/**
-	 * @Then /^the status code of impersonate action should be "([^"]*)"$/
+	 * @AfterScenario
 	 *
-	 * @param int $statusCode
+	 * @param AfterScenarioScope $scope
+	 *
 	 * @return void
 	 * @throws Exception
 	 */
-	public function checkStatusCodeOfImpersonateApp(int $statusCode): void {
-		if ($this->impersonateResponseCode !== $statusCode) {
-			throw new Exception("Expected status code $statusCode but got $this->impersonateResponseCode");
+	public function resetSubadminFeature(AfterScenarioScope $scope): void {
+		if ($this->subadminFeatureChanged) {
+			$this->featureContext->runOccWithEnvVariables(['config:system:delete allow_subadmins']);
+			$this->subadminFeatureChanged = false;
 		}
-		$this->resetImpersonateResponseCode();
 	}
 
 	/**

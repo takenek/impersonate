@@ -16,12 +16,10 @@
   </testsuites>
   <coverage>
     <include>
-      <directory suffix=".php">.</directory>
+      <directory suffix=".php">./appinfo</directory>
+      <directory suffix=".php">./controller</directory>
+      <directory suffix=".php">./lib</directory>
     </include>
-    <exclude>
-      <directory suffix=".php">./tests</directory>
-      <directory suffix=".php">./l10N</directory>
-    </exclude>
     <report>
       <clover outputFile="./tests/output/clover.xml"/>
     </report>

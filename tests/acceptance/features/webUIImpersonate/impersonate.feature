@@ -46,7 +46,7 @@ Feature: Impersonate
       | only group admins of specific groups | group1 |
 
 
-  Scenario: group admin tries to impersonate other user of same group when allow only an admin setting is set
+  Scenario: group admin can not impersonate other user of same group when allow only an admin setting is set
     Given the administrator has created following users with settings:
       | username | password | group  | role        |
       | Alice    | 123456   | group1 | user        |
@@ -54,8 +54,5 @@ Feature: Impersonate
     And "allow only an admin" option in impersonate settings has been set to " "
     And user "Alice" has created folder "test-folder"
     And user "Bob" has logged in using the webUI
-    And the user has browsed to the users page
-    When the user impersonates user "Alice" using the webUI
-    Then dialog should be displayed on the webUI
-      | title | content             |
-      | Error | Can not impersonate |
+    When the user browses to the users page
+    Then the impersonate action should not be available for user "Alice" on the webUI

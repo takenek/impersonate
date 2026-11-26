@@ -70,3 +70,28 @@ Feature: Impersonate
       | allow only an admin                  |        | 404         |
       | allow all group admins               |        | 404         |
       | only group admins of specific groups | group1 | 404         |
+
+  Scenario Outline: Group admins can not impersonate when the group admin feature is disabled (ownCloud 11 default)
+    Given "<impersonate-setting>" option in impersonate settings has been set to "<value>"
+    And the group admin feature has been disabled
+    When "Bob" sends a request to impersonate user "Alice"
+    Then the HTTP status code should be "404"
+    Examples:
+      | impersonate-setting                  | value  |
+      | allow all group admins               |        |
+      | only group admins of specific groups | group1 |
+
+  Scenario: Admin can not impersonate themselves
+    When "admin" sends a request to impersonate user "admin"
+    Then the HTTP status code should be "404"
+
+  Scenario: Admin can not impersonate a disabled user
+    Given user "Alice" has been disabled
+    When "admin" sends a request to impersonate user "Alice"
+    Then the HTTP status code should be "404"
+
+  Scenario: A leftover group list does not allow group admins to impersonate when only admins are allowed
+    Given "allow only an admin" option in impersonate settings has been set to ""
+    And parameter "impersonate_include_groups_list" of app "impersonate" has been set to '["group1"]'
+    When "Bob" sends a request to impersonate user "Alice"
+    Then the HTTP status code should be "404"

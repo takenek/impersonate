@@ -1,5 +1,15 @@
 <?php
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
+ * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
+ * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * See LICENSE and COPYRIGHT.
+ *
+ * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
+ * * Copyright (C) 2022 ownCloud GmbH and contributors
+ */
+/**
  * ownCloud
  *
  * @author Phillip Davis <phil@jankaritech.com>
@@ -49,6 +59,7 @@ return (new Config())
 			)
 			->addContext('OccContext')
 			->addContext('OccUsersGroupsContext')
+			->addContext('AppConfigurationContext')
 			->withPaths('%paths.base%/../features/apiImpersonate'))
 		->withSuite((new Suite('webUIImpersonate'))
 			->addContext('ImpersonateAppContext')

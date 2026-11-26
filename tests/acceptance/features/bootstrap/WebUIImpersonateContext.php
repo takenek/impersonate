@@ -1,6 +1,14 @@
 <?php declare(strict_types=1);
 
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
+ * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
+ * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * See LICENSE and COPYRIGHT.
+ *
+ * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
+ *
  * ownCloud
  *
  * @author Swikriti Tripathi <swikriti@jankaritech.com>
@@ -64,6 +72,22 @@ class WebUIImpersonateContext extends RawMinkContext implements Context {
 	public function administratorImpersonatesUserUsingTheWebui(string $user):void {
 		$username = $this->featureContext->getActualUsername($user);
 		$this->userImpersonatePage->impersonateUser($this->getSession(), $username);
+	}
+
+	/**
+	 * @Then the impersonate action should not be available for user :user on the webUI
+	 *
+	 * @param string $user
+	 *
+	 * @return void
+	 * @throws Exception
+	 */
+	public function theImpersonateActionShouldNotBeAvailableForUser(string $user):void {
+		$username = $this->featureContext->getActualUsername($user);
+		Assert::assertFalse(
+			$this->userImpersonatePage->isImpersonateActionAvailable($username),
+			__METHOD__ . " the impersonate action was not expected for user '$username'"
+		);
 	}
 
 	/**

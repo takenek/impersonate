@@ -1,5 +1,13 @@
 <?php
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
+ * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
+ * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * See LICENSE and COPYRIGHT.
+ *
+ * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
+ *
  * ownCloud - impersonate
  *
  * This file is licensed under the Affero General Public License version 3 or
@@ -9,10 +17,9 @@
  * @copyright Jörn Friedrich Dreyer 2015
  */
 
-use OCP\AppFramework\App;
-
-$application = new App('impersonate');
+$application = new \OCA\Impersonate\AppInfo\Application();
 $application->registerRoutes(
+	// @phan-suppress-next-line PhanUndeclaredThis
 	$this,
 	[
 		'routes' => [
@@ -24,19 +31,11 @@ $application->registerRoutes(
 				'verb' => 'POST',
 			],
 
-			// Land in admin section to add settings
-			[
-				'name' => 'admin_settings#impersonateAdminTemplate',
-				'url'  => '/settings/impersonatetemplate',
-				'verb' => 'POST',
-			],
-
-			//Land in index page
-			[
-				'name' => 'Logout#logoutcontroller',
-				'url' => '/logout',
-				'verb' => 'POST',
-			],
+			// NOTE: switching back to the impersonator is handled by the
+			// '\OC\User\Session::pre_logout' listener registered in appinfo/app.php,
+			// not by an HTTP route. The former 'admin_settings#impersonateAdminTemplate'
+			// and 'Logout#logoutcontroller' routes pointed to controllers that cannot be
+			// dispatched and only produced HTTP 500 errors, so they were removed.
 
 			//Get the data to validate for the app
 			[

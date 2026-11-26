@@ -9,10 +9,14 @@ The Impersonate application allows administrators, and group admins, to log in a
 Once Impersonate is installed, a new column will be available in the user management panel. Click on the icon next to the user that you want to impersonate and you will be logged in as that user. Your current session will be temporarily suspended, and you will see a notification at the top of the page reminding you that you’re impersonating another user. Once you’re finished, log out, and you will return to your previous user session.
 
 As a security measure, the application lets ownCloud administrators restrict the ability to impersonate users in specific groups. When enabled and configured, only a group’s administrator can impersonate members of their group. Administrators can find configuration options in the "User Authentication" section of the "Admin settings" panel.
+
+On ownCloud 11 the group admin feature is disabled by default. Group admins can only impersonate users when 'allow_subadmins' => true is set in config.php.
+
+Maintained by Marek Królikowski (TaKeN), TaKeN.PL Usługi Informatyczne Marek Królikowski. Based on the ownCloud "impersonate" app by Jörn Friedrich Dreyer, Sujith Haridasan and contributors.
 </description>
 	<licence>AGPL</licence>
-	<author>Jörn Friedrich Dreyer, Sujith Haridasan</author>
-	<version>0.7.0</version>
+	<author>Marek Królikowski (TaKeN)</author>
+	<version>1.0.0</version>
         <types>
 	       <authentication/>
         </types>
@@ -20,13 +24,13 @@ As a security measure, the application lets ownCloud administrators restrict the
 	<documentation>
 	<admin>https://doc.owncloud.com/server/latest/admin_manual/configuration/general_topics/impersonate_users.html</admin>
 	</documentation>
-	<bugs>https://github.com/owncloud/impersonate/issues</bugs>
-	<repository type="git">http://github.com/owncloud/impersonate.git</repository>
+	<bugs>https://github.com/takenek/impersonate/issues</bugs>
+	<repository type="git">https://github.com/takenek/impersonate.git</repository>
 	<dependencies>
                 <owncloud min-version="11" max-version="11" />
 	</dependencies>
 	<category>tools</category>
-	<screenshot>https://raw.githubusercontent.com/owncloud/screenshots/master/impersonate/impersonate.png</screenshot>
+	<screenshot>https://raw.githubusercontent.com/takenek/impersonate/main/screenshot/impersonate.png</screenshot>
 	<settings>
 		<admin>OCA\Impersonate\AdminPanel</admin>
 	</settings>

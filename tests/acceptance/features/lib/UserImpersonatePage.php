@@ -1,6 +1,14 @@
 <?php declare(strict_types=1);
 
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
+ * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
+ * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * See LICENSE and COPYRIGHT.
+ *
+ * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
+ *
  * ownCloud
  *
  * @author Swikriti Tripathi <swikriti@jankaritech.com>
@@ -38,7 +46,7 @@ class UserImpersonatePage extends UsersPage {
 	protected $path = '/index.php/settings/users';
 	protected string $impersonateXpath = './/a[@class="action permanent impersonate"]';
 	protected string $userXpath = '//span[contains(@id,"expandDisplayName") and text()="%s"]';
-	protected string $impersonateNotificationXpath = '//div[@id="notification-container"]//div[@id="impersonate-notification"]/a';
+	protected string $impersonateNotificationXpath = '//div[@id="notification-container"]//div[@id="impersonate-notification"]//a';
 
 	/**
 	 * @param Session $session
@@ -55,6 +63,29 @@ class UserImpersonatePage extends UsersPage {
 		);
 		$impersonateButton->click();
 		$this->waitForAjaxCallsToStartAndFinish($session);
+	}
+
+	/**
+	 * @param string $user
+	 *
+	 * @return bool
+	 *
+	 * @throws Exception
+	 */
+	public function isImpersonateActionAvailable(string $user):bool {
+		$userFromTable = $this->findUserInTable($user);
+		// the cell is added asynchronously once getimpersonatedata answered:
+		// wait for either the action or the empty cell before deciding
+		$decided = './/a[@class="action permanent impersonate"] | .//td[contains(@class, "impersonateDisabled")]';
+		$end = \microtime(true) + STANDARD_UI_WAIT_TIMEOUT_MILLISEC / 1000;
+		while ($userFromTable->find('xpath', $decided) === null && \microtime(true) < $end) {
+			\usleep(STANDARD_SLEEP_TIME_MICROSEC);
+		}
+		$this->assertElementNotNull(
+			$userFromTable->find('xpath', $decided),
+			__METHOD__ . " the impersonate column of user '$user' was not rendered"
+		);
+		return $userFromTable->find('xpath', $this->impersonateXpath) !== null;
 	}
 
 	/**

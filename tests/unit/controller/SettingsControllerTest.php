@@ -1,703 +1,248 @@
 <?php
 /**
- * ownCloud - impersonate
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Original author: Marek Królikowski (TaKeN)
+ * Original project: https://github.com/takenek/impersonate
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE and COPYRIGHT for the license and the AGPL section 7 attribution terms.
  *
- * This file is licensed under the Affero General Public License version 3 or
- * later. See the COPYING file.
+ * @author    Marek Królikowski (TaKeN)
+ * @link      https://github.com/takenek
+ * @license   AGPL-3.0-or-later
  *
- * @author Jörn Friedrich Dreyer <jfd@owncloud.com>
- * @author Sujith Haridasan <sharidasan@owncloud.com>
- * @copyright Jörn Friedrich Dreyer 2015
+ * This program is free software: you can redistribute it and/or modify it under the terms of the
+ * GNU Affero General Public License as published by the Free Software Foundation, either version 3
+ * of the License, or (at your option) any later version.
  */
 
-namespace OCA\Impersonate\Tests\Controller;
+namespace OCA\Impersonate\Tests\Unit\Controller;
 
-use OC\SubAdmin;
 use OCA\Impersonate\Controller\SettingsController;
-use OCP\AppFramework\Http\JSONResponse;
+use OCA\Impersonate\Policy;
+use OCA\Impersonate\Util;
 use OCP\AppFramework\Http;
-use OCP\IAppConfig;
-use OCP\IGroup;
-use OCP\IGroupManager;
+use OCP\IConfig;
 use OCP\IL10N;
-use OCP\IRequest;
 use OCP\ILogger;
+use OCP\IRequest;
 use OCP\IUser;
 use OCP\IUserManager;
 use OCP\IUserSession;
-use OCP\ISession;
+use PHPUnit\Framework\MockObject\MockObject;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\EventDispatcher\GenericEvent;
 use Test\TestCase;
 
-/**
- * Class SettingsControllerTest
- * @group DB
- */
-
 class SettingsControllerTest extends TestCase {
-	/** @var string */
-	private $appName;
-	/** @var IRequest */
-	private $request;
-	/** @var IUserManager */
+	/** @var IUserManager|MockObject */
 	private $userManager;
-	/** @var IUserSession */
+	/** @var IUserSession|MockObject */
 	private $userSession;
+	/** @var IConfig|MockObject */
+	private $config;
+	/** @var Policy|MockObject */
+	private $policy;
+	/** @var Util|MockObject */
+	private $util;
+	/** @var EventDispatcherInterface|MockObject */
+	private $eventDispatcher;
 	/** @var SettingsController */
 	private $controller;
-	/** @var ILogger */
-	private $logger;
-	/** @var  IGroupManager */
-	private $groupManger;
-	/** @var  SubAdmin */
-	private $subAdmin;
-	/** @var  ISession */
-	private $session;
-	/** @var IAppConfig  */
-	private $config;
-	/** @var  IL10N */
-	private $l;
-	private $defaultTokenProvider;
-	private $util;
+	/** @var string */
+	private $appEnabled = 'yes';
 
-	public function setUp(): void {
-		$this->appName = 'impersonate';
-		$this->request = $this->getMockBuilder(
-			'\OCP\IRequest'
-		)
-			->disableOriginalConstructor()
-			->getMock();
-		$this->userManager = $this->getMockBuilder(
-			'\OCP\IUserManager'
-		)
-			->disableOriginalConstructor()
-			->getMock();
-		$this->userSession = $this->getMockBuilder(
-			'\OCP\IUserSession'
-		)
-			->disableOriginalConstructor()
-			->getMock();
-		$this->logger = $this->getMockBuilder(
-			'\OCP\ILogger'
-		)
-			->disableOriginalConstructor()
-			->getMock();
-		$this->groupManger = $this->getMockBuilder(IGroupManager::class)
-			->getMock();
-		$this->subAdmin  = $this->getMockBuilder(SubAdmin::class)
-			->disableOriginalConstructor()
-			->getMock();
-		$this->session = $this->getMockBuilder(ISession::class)
-			->getMock();
-		$this->config = $this->getMockBuilder(IAppConfig::class)
-			->getMock();
-		$this->l = $this->getMockBuilder(IL10N::class)
-			->getMock();
-		$this->l->method('t')->will($this->returnCallback(function ($text) {
-			return $text;
-		}));
-		$this->defaultTokenProvider = $this->createMock(\OC\Authentication\Token\DefaultTokenProvider::class);
-		$this->util = $this->createMock(\OCA\Impersonate\Util::class);
-
+	protected function setUp(): void {
+		parent::setUp();
+		$this->userManager = $this->createMock(IUserManager::class);
+		$this->userSession = $this->createMock(IUserSession::class);
+		$this->config = $this->createMock(IConfig::class);
+		$this->config->method('getAppValue')->willReturnCallback(function ($app, $key, $default = '') {
+			return $key === 'enabled' ? $this->appEnabled : $default;
+		});
+		$l10n = $this->createMock(IL10N::class);
+		$l10n->method('t')->willReturnArgument(0);
+		$this->policy = $this->createMock(Policy::class);
+		$this->util = $this->createMock(Util::class);
+		$this->eventDispatcher = $this->createMock(EventDispatcherInterface::class);
+		$request = $this->createMock(IRequest::class);
+		$request->method('getRemoteAddress')->willReturn('10.0.0.1');
 		$this->controller = new SettingsController(
-			$this->appName,
-			$this->request,
+			'impersonate',
+			$request,
 			$this->userManager,
 			$this->userSession,
-			$this->logger,
-			$this->groupManger,
-			$this->subAdmin,
-			$this->session,
+			$this->createMock(ILogger::class),
 			$this->config,
-			$this->l,
-			$this->defaultTokenProvider
-		);
-
-		parent::setUp();
-	}
-
-	public function testImpersonateNotFound() {
-		$user = $this->createMock('OCP\IUser');
-		$user->method('getUID')
-			->willReturn('admin');
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$this->userSession->expects($this->never())
-			->method('setUser');
-
-		$this->assertEquals(
-			new JSONResponse([
-				'error' => 'userNotFound',
-				'message' => $this->l->t("Unexpected error occurred")
-			], Http::STATUS_NOT_FOUND),
-			$this->controller->impersonate('notexisting@uid')
-		);
-	}
-
-	public function usersProvider() {
-		return [
-			['username', 'username', 'admin'],
-			['Username', 'username', 'groupadmin'],
-			['NormalUser', 'username', 'normaluser']
-		];
-	}
-
-	/**
-	 * @dataProvider usersProvider
-	 * @param $query
-	 * @param $uid
-	 * @param $group
-	 */
-	public function testImpersonate($query, $uid, $group) {
-		$user = $this->createMock('\OCP\IUser');
-
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$user->method('getUID')
-			->willReturn($uid);
-
-		$this->userManager->expects($this->atLeastOnce())
-			->method('get')
-			->with($query)
-			->willReturn($user);
-
-		$user->expects($this->once())
-			->method('getLastLogin')
-			->willReturn(1);
-
-		if ($group === 'admin') {
-			$this->config
-				->method('getValue')
-				->will($this->returnValueMap([
-					['impersonate', 'enabled', "no", "yes"]
-				]));
-			//This user belongs to admin user
-			$this->groupManger->expects($this->any())
-				->method('isAdmin')
-				->willReturn(true);
-
-			$this->assertEquals(
-				new JSONResponse(),
-				$this->controller->impersonate($query)
-			);
-		} elseif ($group === 'groupadmin') {
-			$this->config
-				->method('getValue')
-				->will($this->returnValueMap([
-					['impersonate', 'enabled', "no", "yes"],
-					['impersonate', 'impersonate_include_groups_list', "", \json_encode([$group])],
-					['impersonate', 'impersonate_all_groupadmins', "false", "false"]
-				]));
-
-			$iGroup = $this->createMock(IGroup::class);
-
-			$this->groupManger->expects($this->any())
-				->method('get')
-				->willReturn($iGroup);
-
-			$this->groupManger->expects($this->any())
-				->method('isInGroup')
-				->willReturn(true);
-
-			$this->subAdmin->expects($this->any())
-				->method('isSubAdminofGroup')
-				->willReturn(true);
-
-			$calledAfterImpersonate = [];
-			\OC::$server->getEventDispatcher()->addListener(
-				'user.afterimpersonate',
-				function (GenericEvent $event) use (&$calledAfterImpersonate) {
-					$calledAfterImpersonate[] = 'user.afterimpersonate';
-					$calledAfterImpersonate[] = $event;
-				}
-			);
-			$this->assertEquals(
-				new JSONResponse(),
-				$this->controller->impersonate($query)
-			);
-			$this->assertEquals('user.afterimpersonate', $calledAfterImpersonate[0]);
-			$this->assertInstanceOf(GenericEvent::class, $calledAfterImpersonate[1]);
-			$this->assertArrayHasKey('impersonator', $calledAfterImpersonate[1]);
-			$this->assertArrayHasKey('targetUser', $calledAfterImpersonate[1]);
-			$this->assertEquals('username', $calledAfterImpersonate[1]->getArgument('impersonator'));
-			$this->assertEquals('Username', $calledAfterImpersonate[1]->getArgument('targetUser'));
-		} elseif ($group === 'normaluser') {
-			$this->config
-				->method('getValue')
-				->will($this->returnValueMap([
-					['impersonate', 'enabled', "no", "yes"],
-					['impersonate', 'impersonate_include_groups_list', "", ""],
-					['impersonate', 'impersonate_all_groupadmins', "false", "false"]
-				]));
-
-			$this->groupManger->expects($this->any())
-				->method('isAdmin')
-				->willReturn(false);
-
-			$this->assertEquals(
-				new JSONResponse([
-					'error' => "cannotImpersonate",
-					'message' => $this->l->t("Can not impersonate"),
-				], http::STATUS_NOT_FOUND),
-				$this->controller->impersonate($query)
-			);
-		}
-	}
-
-	/**
-	 * Negative test to verify a scenario:
-	 * 1) Login as group admin
-	 * 2) Try to impersonate a user who is not part of
-	 * the group which is owned by group admin
-	 */
-	public function testUserNotPartOfGroup() {
-		$user = $this->createMock('\OCP\IUser');
-
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$user->method('getUID')
-			->willReturn('username');
-
-		$this->userManager->expects($this->atLeastOnce())
-			->method('get')
-			->with('Username')
-			->willReturn($user);
-
-		$user->expects($this->once())
-			->method('getLastLogin')
-			->willReturn(1);
-
-		$this->config
-			->method('getValue')
-			->will($this->returnValueMap([
-				['impersonate', 'enabled', "no", "yes"],
-				['impersonate', 'impersonate_include_groups_list', "", \json_encode(['testgroup'])],
-				['impersonate', 'impersonate_all_groupadmins', "false", "false"]
-			]));
-
-		$iGroup = $this->createMock(IGroup::class);
-
-		$this->groupManger->expects($this->any())
-			->method('get')
-			->willReturn($iGroup);
-
-		$this->groupManger->expects($this->any())
-			->method('isInGroup')
-			->willReturn(true);
-
-		$this->subAdmin->expects($this->any())
-			->method('isSubAdminofGroup')
-			->willReturn(false);
-
-		$this->assertEquals(
-			new JSONResponse([
-				'error' => 'cannotImpersonate',
-				'message' => $this->l->t('Can not impersonate'),
-			], http::STATUS_NOT_FOUND),
-			$this->controller->impersonate('Username')
+			$l10n,
+			$this->policy,
+			$this->util,
+			$this->eventDispatcher
 		);
 	}
 
 	/**
-	 * Test to verify, that a vanished group will not break impersonation
-	 * https://github.com/owncloud/impersonate/issues/118
+	 * @return IUser|MockObject
 	 */
-	public function testWronglyConfiguredGroupListAllowsImpersonation() {
-		$user = $this->createMock('\OCP\IUser');
-
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$user->method('getUID')
-			->willReturn('username');
-
-		$this->userManager->expects($this->atLeastOnce())
-			->method('get')
-			->with('Username')
-			->willReturn($user);
-
-		$user->expects($this->once())
-			->method('getLastLogin')
-			->willReturn(1);
-
-		$this->config
-			->method('getValue')
-			->will($this->returnValueMap([
-				['impersonate', 'enabled', "no", "yes"],
-				['impersonate', 'impersonate_include_groups_list', "", \json_encode(['testgroup','testgroup2'])],
-				['impersonate', 'impersonate_all_groupadmins', "false", "false"]
-			]));
-
-		$iGroup = $this->createMock(IGroup::class);
-
-		$this->groupManger->expects($this->any())
-			->method('get')
-			->will(
-				$this->returnValueMap(
-					[
-					['testgroup', null],
-					['testgroup2', $iGroup]
-					]
-				)
-			);
-
-		$this->groupManger->expects($this->any())
-			->method('isInGroup')
-			->will(
-				$this->returnValueMap(
-					[
-						['username','testgroup', false],
-						['username','testgroup2', true]
-					]
-				)
-			);
-
-		$this->subAdmin->expects($this->any())
-			->method('isSubAdminofGroup')
-			->willReturn(true);
-
-		$calledAfterImpersonate = [];
-		\OC::$server->getEventDispatcher()->addListener(
-			'user.afterimpersonate',
-			function (GenericEvent $event) use (&$calledAfterImpersonate) {
-				$calledAfterImpersonate[] = 'user.afterimpersonate';
-				$calledAfterImpersonate[] = $event;
-			}
-		);
-		$this->assertEquals(
-			new JSONResponse(),
-			$this->controller->impersonate('Username')
-		);
-		$this->assertEquals('user.afterimpersonate', $calledAfterImpersonate[0]);
-		$this->assertInstanceOf(GenericEvent::class, $calledAfterImpersonate[1]);
-		$this->assertArrayHasKey('impersonator', $calledAfterImpersonate[1]);
-		$this->assertArrayHasKey('targetUser', $calledAfterImpersonate[1]);
-		$this->assertEquals('username', $calledAfterImpersonate[1]->getArgument('impersonator'));
-		$this->assertEquals('Username', $calledAfterImpersonate[1]->getArgument('targetUser'));
-	}
-
-	/**
-	 * When there is no user logged in or if the session is null,
-	 * then no impersonation should be done. This test validates it.
-	 */
-	public function testNullUserSession() {
-		$this->userSession
-			->method('getUser')
-			->willReturn(null);
-
-		$this->assertEquals(
-			new JSONResponse([
-				'error' => 'cannotImpersonate',
-				'message' => $this->l->t('Can not impersonate'),
-			], http::STATUS_NOT_FOUND),
-			$this->controller->impersonate('foo')
-		);
-	}
-
-	public function neverLoggedIn() {
-		return [
-			['UserName', 'username']
-		];
-	}
-
-	/**
-	 * @dataProvider neverLoggedIn
-	 * @param $query
-	 * @param $uid
-	 */
-	public function testImpersonateNeverLoggedInUser($query, $uid) {
-		$user = $this->createMock('\OCP\IUser');
-		$user->method('getUID')
-			->willReturn($uid);
-
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$this->userManager->expects($this->once())
-			->method('get')
-			->with($query)
-			->willReturn($user);
-
-		$user->expects($this->once())
-			->method('getLastLogin')
-			->willReturn(0);
-
-		$this->assertEquals(
-			new JSONResponse(['error' => "userNeverLoggedIn",
-				'message' => $this->l->t("Can not impersonate")
-			], http::STATUS_NOT_FOUND),
-			$this->controller->impersonate($query)
-		);
-	}
-
-	public function adminAndGroupAdminUsers() {
-		return [
-			['admin', 'admin', 'subadmin', 'subadmin']
-		];
-	}
-
-	/**
-	 * @dataProvider adminAndGroupAdminUsers
-	 * @param $adminUser
-	 * @param $adminUid
-	 * @param $subadminUser
-	 * @param $subadminUid
-	 */
-	public function testRestrictSwitchToAdminUser($adminUser, $adminUid, $subadminUser, $subadminUid) {
-		$user = $this->createMock('\OCP\IUser');
-		$user->method('getUID')
-			->willReturn($subadminUid);
-
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$this->userManager->expects($this->once())
-			->method('get')
-			->with($adminUser)
-			->willReturn($user);
-
-		$user->expects($this->once())
-			->method('getLastLogin')
-			->willReturn(1);
-
-		$this->groupManger
-			->expects($this->exactly(2))
-			->method('isAdmin')
-			->withConsecutive(
-				[$adminUser],
-				[$subadminUser],
-			)
-			->willReturnOnConsecutiveCalls(true, false);
-
-		$this->assertEquals(
-			new JSONResponse(['error' => "cannotImpersonateAdminUser",
-				'message' => $this->l->t("Can not impersonate")
-				], http::STATUS_NOT_FOUND),
-			$this->controller->impersonate($adminUser)
-		);
-	}
-
-	public function groupAdminUsers() {
-		return [
-			['subadmin', 'subadmin']
-		];
-	}
-
-	/**
-	 * @dataProvider groupAdminUsers
-	 * @param $subadminUser
-	 * @param $subadminUid
-	 */
-	public function testRestrictNestedImpersonate($subadminUser, $subadminUid) {
-		$user = $this->createMock('\OCP\IUser');
-		$user->method('getUID')
-			->willReturn($subadminUid);
-
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$this->session
-			->method('get')
-			->willReturn('foo');
-
-		$this->assertEquals(
-			new JSONResponse(['error' => "stopNestedImpersonation",
-			'message' => $this->l->t("Can not impersonate")
-		], http::STATUS_NOT_FOUND),
-			$this->controller->impersonate('bar')
-		);
-	}
-
-	/**
-	 * @dataProvider providesGetDataForImpersonateApp
-	 */
-	public function testGetDataForImpersonateApp($enabled, $includedGroups, $allowAllSubadminGroups, $currentUser, $isAdmin = false, $isSubAdmin = false) {
-		$map = [
-			['impersonate','impersonate_include_groups', false, $enabled],
-			['impersonate','impersonate_include_groups_list', '[]', $includedGroups],
-			['impersonate', 'impersonate_all_groupadmins', false, $allowAllSubadminGroups]
-		];
-		$this->config
-			->method('getValue')
-			->will($this->returnValueMap($map));
-
-		if ($currentUser === null) {
-			$user = null;
-		} else {
-			$user = $this->createMock('\OCP\IUser');
-		}
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-		if ($currentUser === null) {
-			$user = null;
-			$this->assertEquals(
-				new JSONResponse([
-					$includedGroups, $enabled, $allowAllSubadminGroups, false, false
-				]),
-				$this->controller->getDataForImpersonateApp()
-			);
-		} else {
-			$user->expects($this->once())
-				->method('getUID')
-				->willReturn($currentUser);
-			$this->groupManger
-				->method('isAdmin')
-				->willReturn($isAdmin);
-			$this->subAdmin
-				->method('isSubAdmin')
-				->willReturn($isSubAdmin);
-			$this->assertEquals(
-				new JSONResponse([
-					$includedGroups, $enabled, $allowAllSubadminGroups, $isAdmin, $isSubAdmin
-				]),
-				$this->controller->getDataForImpersonateApp()
-			);
-		}
-	}
-
-	public function providesGetDataForImpersonateApp() {
-		return [
-			[true, ['hello', 'world'], "true", null],
-			[true, ['hello', 'world'], "false", 'user', true, true],
-			[true, ['hello', 'world'], "false",'user', true, false],
-			[true, ['hello', 'world'], "false", 'user', false, true],
-			[false, ['hello', 'world'], "false", 'user', false, true],
-			[false, [], "true", 'user', false, true],
-		];
-	}
-
-	public function testImpersonateGrantAllSubadmin() {
+	private function user(string $uid, int $lastLogin = 1700000000) {
 		$user = $this->createMock(IUser::class);
-		$user->method('getUID')
-			->willReturn('foo');
-
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-
-		$targetUser = $this->createMock(IUser::class);
-		$targetUser->method('getUID')->willReturn('baro');
-		$targetUser->method('getLastLogin')
-			->willReturn(1);
-
-		$this->userManager->method('get')
-			->willReturn($targetUser);
-
-		$this->groupManger->method('isAdmin')
-			->willReturn(false);
-
-		$group1 = $this->createMock(IGroup::class);
-		$group1->method('getGID')->willReturn('group1');
-		$group2 = $this->createMock(IGroup::class);
-		$group2->method('getGID')->willReturn('group2');
-		$this->subAdmin->method('getSubAdminsGroups')
-			->with($this->equalTo($user))
-			->willReturn([$group1, $group2]);
-
-		$this->groupManger->method('isInGroup')->willReturnMap([
-			['baro', 'group1', true],
-			['baro', 'group2', false],
-		]);
-
-		$this->config
-			->method('getValue')
-			->will($this->returnValueMap([
-				['impersonate', 'enabled', "no", "yes"],
-				['impersonate', 'impersonate_include_groups_list', "", ""],
-				['impersonate', 'impersonate_all_groupadmins', "false", "true"]
-			]));
-
-		$this->assertEquals(
-			new JSONResponse(),
-			$this->controller->impersonate('foo')
-		);
+		$user->method('getUID')->willReturn($uid);
+		$user->method('getLastLogin')->willReturn($lastLogin);
+		$user->method('isEnabled')->willReturn(true);
+		return $user;
 	}
 
-	public function testImpersonateAppDisabled() {
-		$this->config
-			->method('getValue')
-			->will($this->returnValueMap([
-				['impersonate', 'enabled', "no", "no"],
-			]));
-		
-		$this->userSession->expects($this->never())
-			->method('getUser');
-
-		$this->assertEquals(
-			new JSONResponse(['error' => "cannotImpersonate",
-				'message' => $this->l->t("Can not impersonate. Please contact your server administrator to allow impersonation.")
-			], http::STATUS_NOT_FOUND),
-			$this->controller->impersonate('foo')
-		);
+	private function loggedIn(?IUser $user): void {
+		$this->userSession->method('getUser')->willReturn($user);
 	}
 
-	public function testImpersonateAppEnabledForTargetUser() {
-		$query='NormalUser';
-		$uid='username';
-		$group='app_enabled_group';
+	private function assertError(string $code, $response): void {
+		$this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
+		$this->assertSame($code, $response->getData()['error']);
+	}
 
-		$this->config
-			->method('getValue')
-			->will($this->returnValueMap([
-				['impersonate', 'enabled', "no", \json_encode([$group])],
-				['impersonate', 'impersonate_all_groupadmins', "false", "true"]
-			]));
-		
-		$user = $this->createMock('\OCP\IUser');
+	public function testDataForAnonymous(): void {
+		$this->loggedIn(null);
+		$this->assertSame(['[]', 'false', 'false', false, false, '[]'], $this->controller->getDataForImpersonateApp()->getData());
+	}
 
-		$user->method('getUID')
-			->willReturn($uid);
+	public function testDataForAdmin(): void {
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('isAdmin')->willReturn(true);
+		$this->policy->method('getIncludedGroups')->willReturn(['g1', 'g2']);
+		$this->policy->method('isIncludeGroupsMode')->willReturn(true);
+		$this->policy->method('isAllGroupAdminsMode')->willReturn(false);
+		$this->assertSame(['["g1","g2"]', 'true', 'false', true, false, '[]'], $this->controller->getDataForImpersonateApp()->getData());
+	}
 
-		$user->expects($this->once())
-			->method('getLastLogin')
-			->willReturn(1);
+	public function testDataForGroupAdminOnlyContainsOwnGroups(): void {
+		$carol = $this->user('carol');
+		$this->loggedIn($carol);
+		$this->policy->method('isAdmin')->willReturn(false);
+		$this->policy->method('isDelegatedGroupAdmin')->willReturn(true);
+		$this->policy->method('getImpersonableGroupIds')->with($carol)->willReturn(['g1']);
+		$this->policy->method('getAdminUidsInGroups')->with(['g1'])->willReturn(['dave']);
+		$this->policy->method('isIncludeGroupsMode')->willReturn(true);
+		$this->policy->method('isAllGroupAdminsMode')->willReturn(false);
+		$this->assertSame(['["g1"]', 'true', 'false', false, true, '["dave"]'], $this->controller->getDataForImpersonateApp()->getData());
+	}
 
-		$this->userSession
-			->method('getUser')
-			->willReturn($user);
-	
-		$this->userManager->expects($this->atLeastOnce())
-			->method('get')
-			->with($query)
-			->willReturn($user);
+	public function testDataForNormalUserRevealsNothing(): void {
+		$this->loggedIn($this->user('bob'));
+		$this->policy->method('isAdmin')->willReturn(false);
+		$this->policy->method('isDelegatedGroupAdmin')->willReturn(false);
+		$this->policy->expects($this->never())->method('getIncludedGroups');
+		$this->assertSame(['[]', 'false', 'false', false, false, '[]'], $this->controller->getDataForImpersonateApp()->getData());
+	}
 
-		$group1 = $this->createMock(IGroup::class);
-		$group1->method('getGID')->willReturn('group1');
-		$group2 = $this->createMock(IGroup::class);
-		$group2->method('getGID')->willReturn('group2');
-		$this->subAdmin->method('getSubAdminsGroups')
-			->with($this->equalTo($user))
-			->willReturn([$group1, $group2]);
+	public function testDataWhileImpersonating(): void {
+		$this->loggedIn($this->user('alice'));
+		$this->util->method('isImpersonating')->willReturn(true);
+		$this->assertSame(['[]', 'false', 'false', false, false, '[]'], $this->controller->getDataForImpersonateApp()->getData());
+	}
 
-		$this->groupManger->expects($this->any())
-			->method('isAdmin')
-			->willReturn(false);
+	public function testAppDisabled(): void {
+		$this->appEnabled = 'no';
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
+	}
 
-		$this->groupManger->expects($this->any())
-			->method('isInGroup')
-			->will($this->returnValueMap([
-				[$query, $group, true],
-				[$uid, 'group1', true],
-				[$uid, 'group2', false],
-			]));
+	public function testNoCurrentUser(): void {
+		$this->loggedIn(null);
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
+	}
 
-		$this->session->expects($this->never())
-			->method('remove');
+	public function testNestedImpersonation(): void {
+		$this->loggedIn($this->user('alice'));
+		$this->util->method('isImpersonating')->willReturn(true);
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->assertError('stopNestedImpersonation', $this->controller->impersonate('bob'));
+	}
 
-		$this->assertEquals(
-			new JSONResponse(),
-			$this->controller->impersonate($query)
+	public function testUserWithoutPermissionLearnsNothingAboutTheTarget(): void {
+		$this->loggedIn($this->user('bob'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(false);
+		$this->userManager->expects($this->never())->method('get');
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('admin'));
+	}
+
+	public function testUnknownTargetForAdmin(): void {
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->policy->method('isAdmin')->willReturn(true);
+		$this->userManager->method('get')->willReturn(null);
+		$this->assertError('userNotFound', $this->controller->impersonate('nobody'));
+	}
+
+	public function testUnknownTargetForGroupAdmin(): void {
+		$this->loggedIn($this->user('carol'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->policy->method('isAdmin')->willReturn(false);
+		$this->userManager->method('get')->willReturn(null);
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('nobody'));
+	}
+
+	public static function deniedProvider(): array {
+		return [
+			[true, Policy::ERROR_DISABLED_TARGET, 'userDisabled'],
+			[true, Policy::ERROR_CANNOT_IMPERSONATE, 'cannotImpersonate'],
+			[false, Policy::ERROR_DISABLED_TARGET, 'cannotImpersonate'],
+			[false, Policy::ERROR_ADMIN_TARGET, 'cannotImpersonate'],
+			[false, Policy::ERROR_CANNOT_IMPERSONATE, 'cannotImpersonate'],
+		];
+	}
+
+	/**
+	 * @dataProvider deniedProvider
+	 */
+	public function testDeniedByPolicy(bool $isAdmin, string $policyError, string $expected): void {
+		$this->loggedIn($this->user('someone'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->policy->method('isAdmin')->willReturn($isAdmin);
+		$this->userManager->method('get')->willReturn($this->user('alice'));
+		$this->policy->method('check')->willReturn($policyError);
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->assertError($expected, $this->controller->impersonate('alice'));
+	}
+
+	public function testTargetNeverLoggedIn(): void {
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->policy->method('isAdmin')->willReturn(true);
+		$this->userManager->method('get')->willReturn($this->user('alice', 0));
+		$this->policy->method('check')->willReturn(null);
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->assertError('userNeverLoggedIn', $this->controller->impersonate('alice'));
+	}
+
+	public function testSwitchFailure(): void {
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->policy->method('isAdmin')->willReturn(true);
+		$this->userManager->method('get')->willReturn($this->user('alice'));
+		$this->policy->method('check')->willReturn(null);
+		$this->util->method('startImpersonation')->willThrowException(new \RuntimeException('no session'));
+		$this->eventDispatcher->expects($this->never())->method('dispatch');
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
+	}
+
+	public function testImpersonate(): void {
+		$admin = $this->user('admin');
+		// the canonical uid is used even if the request used another spelling
+		$alice = $this->user('alice');
+		$this->loggedIn($admin);
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->policy->method('isAdmin')->willReturn(true);
+		$this->userManager->method('get')->with('ALICE')->willReturn($alice);
+		$this->policy->method('check')->with($admin, $alice)->willReturn(null);
+		$this->util->expects($this->once())->method('startImpersonation')->with($alice, $admin);
+		$this->eventDispatcher->expects($this->once())->method('dispatch')->with(
+			$this->callback(function (GenericEvent $e) {
+				return $e->getArgument('impersonator') === 'admin' && $e->getArgument('targetUser') === 'alice';
+			}),
+			'user.afterimpersonate'
 		);
+		$response = $this->controller->impersonate('ALICE');
+		$this->assertSame(Http::STATUS_OK, $response->getStatus());
+		$this->assertSame([], $response->getData());
 	}
 }
