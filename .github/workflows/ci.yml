@@ -199,6 +199,8 @@ jobs:
         with:
           php-version: '8.3'
           extensions: ${{ env.PHP_EXTENSIONS }}
+          # the tests change config.php with occ and expect the web server to see it at once
+          ini-values: opcache.revalidate_freq=0
           coverage: none
           tools: composer:v2
       - name: Throw-away passwords

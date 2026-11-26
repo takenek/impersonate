@@ -15,7 +15,7 @@
 #   PHP_AS          prefix that runs a command as the web server user, e.g. "sudo -u www-data"
 #                   (default: none, i.e. the current user owns the instance)
 #   SESSION_DIR     PHP session directory of the web server (default: session.save_path or the temp dir)
-#   CONFIG_DELAY    seconds to wait after "occ config:system:set" (opcache revalidation; default 2)
+#   CONFIG_DELAY    seconds to wait after "occ config:system:set" (opcache revalidation; default 3)
 set -uo pipefail
 
 : "${OC_DIR:?set OC_DIR}"
@@ -23,7 +23,7 @@ set -uo pipefail
 : "${USER_PASSWORD:?set USER_PASSWORD}"
 BASE=${BASE:-http://localhost:8080}
 PHP_AS=${PHP_AS:-}
-CONFIG_DELAY=${CONFIG_DELAY:-2}
+CONFIG_DELAY=${CONFIG_DELAY:-3}
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DB=$OC_DIR/data/owncloud.db
 if [ -z "${SESSION_DIR:-}" ]; then
