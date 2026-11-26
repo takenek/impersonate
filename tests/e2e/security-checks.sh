@@ -79,6 +79,7 @@ check "$(whoami_ "$C")" anonymous "permission revoked -> session ends"
 setcfg impersonate_all_groupadmins true
 login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" bob)" 200 "admin impersonates bob"
 TID=$(sql "select id from oc_authtoken where uid='bob' and name='Impersonated by admin' order by id desc limit 1")
+[ -n "$TID" ] || bad "impersonation token of bob not found"
 login "$Bj" bob "$USER_PASSWORD"
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$Bj" -c "$Bj" -H "requesttoken: $(token "$Bj")" -X DELETE "$BASE/index.php/settings/personal/authtokens/$TID")
 check "$code" 200 "bob revokes the 'Impersonated by admin' session"
@@ -86,6 +87,7 @@ curl -s -o /dev/null -b "$A" -c "$A" "$BASE/index.php/logout"
 check "$(whoami_ "$A")" anonymous "revoked session + GET /logout without CSRF token -> logged out (no switch back)"
 login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" bob)" 200 "admin impersonates bob again"
 PID=$(sql "select id from oc_authtoken where uid='admin' and type=0 order by id desc limit 1")
+[ -n "$PID" ] || bad "parked admin token not found"
 occ_admin_revoke() { curl -s -o /dev/null -w '%{http_code}' -b "$1" -c "$1" -H "requesttoken: $(token "$1")" -X DELETE "$BASE/index.php/settings/personal/authtokens/$2"; }
 A2=$W/admin2; login "$A2" admin "$ADMIN_PASSWORD"
 check "$(occ_admin_revoke "$A2" "$PID")" 200 "admin revokes the parked session from another browser"

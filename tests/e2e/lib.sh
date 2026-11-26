@@ -51,7 +51,16 @@ occ() {
 	case "${1:-}" in config:system:*) sleep "$CONFIG_DELAY" ;; esac
 	return $rc
 }
-sql() { php -r '$db = new SQLite3($argv[1], SQLITE3_OPEN_READONLY); $r = $db->querySingle($argv[2]); echo $r === null ? "" : $r;' "$DB" "$1"; }
+# sql <query>: first column of the first row (waits while the web server holds a write lock)
+sql() {
+	php -r '
+		$db = new SQLite3($argv[1], SQLITE3_OPEN_READONLY);
+		$db->busyTimeout(15000);
+		$r = $db->querySingle($argv[2]);
+		if ($r === false) { fwrite(STDERR, "sql: query failed: " . $db->lastErrorMsg() . "\n"); exit(1); }
+		echo $r === null ? "" : $r;
+	' "$DB" "$1"
+}
 setcfg() { occ config:app:set impersonate "$1" --value="$2" >/dev/null; }
 reset_policy() {
 	setcfg impersonate_all_groupadmins false
