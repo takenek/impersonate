@@ -1,7 +1,7 @@
 # Impersonate (`impersonate`) – log in as another user on ownCloud 11
 
 [![CI](https://github.com/takenek/impersonate/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/impersonate/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/takenek/impersonate?sort=semver)](https://github.com/takenek/impersonate/releases/latest)
+[![Release](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/release-v1.0.0.svg)](https://github.com/takenek/impersonate/releases/latest)
 [![License](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/license.svg)](LICENSE)
 
 Impersonate lets ownCloud administrators – and, if allowed, group admins – log in as another user
