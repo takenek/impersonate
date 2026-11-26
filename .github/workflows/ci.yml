@@ -172,19 +172,20 @@ jobs:
           mkdir -p "$RUNNER_TEMP/gitleaks"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
           "$RUNNER_TEMP/gitleaks/gitleaks" version
-      # A control: a planted private key must be reported, otherwise the scan below proves nothing.
+      # A control: a planted private key must be reported with the repository's configuration,
+      # otherwise the scans below prove nothing.
       - name: gitleaks detects a planted secret
         run: |
           mkdir -p "$RUNNER_TEMP/control"
           openssl genpkey -algorithm ed25519 -out "$RUNNER_TEMP/control/id_ed25519" 2>/dev/null
-          if "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact "$RUNNER_TEMP/control"; then
+          if "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config .gitleaks.toml "$RUNNER_TEMP/control"; then
             echo "gitleaks did not report the planted key" >&2
             exit 1
           fi
       - name: Scan the history
-        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact --verbose .'
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact --verbose --config .gitleaks.toml .'
       - name: Scan the tree
-        run: '"$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --verbose .'
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --verbose --config .gitleaks.toml .'
 
   e2e:
     name: E2E, security checks, Behat and browser (ownCloud 11.1.0)

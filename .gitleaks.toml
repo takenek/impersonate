@@ -1,0 +1,17 @@
+# Impersonate - gitleaks configuration (secret scanning, .github/workflows/ci.yml job "security").
+#
+# The default rules of the pinned gitleaks release apply to the whole repository and its history.
+# The only exception: the public fingerprint of the release signing key (.github/release-signers),
+# which SECURITY.md and .github/release-signers must quote ("RSA key SHA256:...") and the generic
+# rule takes for a key. Exact value; a new key adds its own line.
+
+title = "Impersonate"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "public fingerprint of the release signing key"
+regexes = [
+    '''^Dh488r7YcvACwpsZov0/TASb3v3FRjz4//bwoQCyPwU$''',
+]
