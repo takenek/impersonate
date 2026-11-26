@@ -1,0 +1,80 @@
+Impersonate for ownCloud 11
+
+Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+Original author of this fork: Marek Królikowski (TaKeN)
+Project: https://github.com/takenek/impersonate
+
+TaKeN is the author's pseudonym. The business name above identifies Marek
+Królikowski trading as TaKeN.PL Usługi Informatyczne Marek Królikowski.
+It does not identify a separate corporate author.
+
+Origin
+------
+
+This project is a fork of the ownCloud "impersonate" app
+(https://github.com/owncloud/impersonate, archived in 2026), created on
+2026-11-26 and maintained by Marek Królikowski (TaKeN). Since the fork the
+app was adapted to ownCloud 11.1 and its security was hardened; large parts
+were rewritten and new components were added (see CHANGELOG.md and the git
+history).
+
+Portions of the code originate from the ownCloud app and remain
+
+  Copyright (C) 2015-2026 ownCloud GmbH and contributors
+  (Jörn Friedrich Dreyer, Sujith Haridasan, Jannik Stehle and others,
+  see AUTHORS.md and the git history)
+
+Their copyright and license notices are kept in the files they apply to, as
+the GNU Affero General Public License requires. Files created in this fork
+carry only the notice of the copyright holder above; files derived from the
+ownCloud app carry both notices and the date of the modification.
+
+License
+-------
+
+This program is free software: you may redistribute it and/or modify it under
+the terms of the GNU Affero General Public License version 3 as published by
+the Free Software Foundation. Files whose notice says so may also be used
+under any later version of that license. The complete, unmodified license
+text is in LICENSE.
+
+This program is distributed without any warranty; see LICENSE, sections
+15 and 16, for the full disclaimer.
+
+Additional attribution and origin terms (AGPLv3 section 7(b) and 7(c))
+---------------------------------------------------------------------
+
+These terms apply only to material owned by the copyright holder identified
+above (new files and the modifications made in this fork) and distributed with
+a source-file notice referring to this COPYRIGHT file. They do not apply to
+material of ownCloud GmbH or other third parties and do not alter the terms
+under which that material is licensed.
+
+1. When conveying that material or modified versions of it, preserve the
+   following reasonable legal and author attribution notices in the
+   corresponding source material:
+
+   Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+   Original author: Marek Królikowski (TaKeN)
+   Original project: https://github.com/takenek/impersonate
+
+2. The origin of that material must not be misrepresented. Modified versions
+   that are conveyed must carry prominent notices stating that they were
+   modified and giving a relevant date, as required by AGPLv3 section 5(a).
+   They must not be represented as an unmodified official release of this
+   project.
+
+These terms do not require an advertising notice, a logo, a link displayed
+in the user interface, or publication of private modifications beyond what
+the AGPL itself requires. They do not prohibit forks, different project
+names, commercial use or charging for distribution. Contributors may add
+accurate notices for their own copyrightable contributions without removing
+applicable existing notices.
+
+Third-party rights and project identity
+--------------------------------------
+
+ownCloud is a trademark of its owner. This project is not affiliated with,
+endorsed by or maintained by ownCloud GmbH or Kiteworks. Third-party
+components retain their own copyright and license notices; no authorship or
+ownership of those components is claimed here.

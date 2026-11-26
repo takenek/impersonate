@@ -4,7 +4,82 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased] - xxxx-xx-xx
+## [Unreleased]
+
+## [1.0.0] - 2026-11-26
+
+First release of this fork (<https://github.com/takenek/impersonate>), maintained by Marek
+Królikowski (TaKeN). Based on the archived ownCloud app owncloud/impersonate 0.7.0.
+
+Requires ownCloud 11 (tested with 11.1.0) and PHP 8.3 (ownCloud 11.1 runs only on PHP 8.3).
+ownCloud 10 is not supported. Upgrade from 0.x: replace the app folder and run `occ upgrade`.
+
+### Security
+- The impersonator's identity-bound session data (login name, the login password that core keeps for
+  "Log-in credentials, save in session" external storages, app password, DAV markers) is no longer
+  available to the impersonated session. Previously the impersonator's password was sent to external
+  storages of the impersonated user.
+- Credentials that would outlive the impersonation can no longer be obtained while impersonating:
+  app passwords (`POST /settings/personal/authtokens`), the URL signing key for pre-signed WebDAV URLs
+  (`/ocs/v1|v2.php/cloud/user/signing-key`) and OAuth2 grants (`/apps/oauth2/`). The paths are
+  matched the way the router matches them. As a backstop, passwordless app passwords of the user
+  created during the impersonation are revoked and a signing key created during it is removed when
+  it ends.
+- An active impersonation is re-checked on every request, after all authentication apps (e.g. LDAP
+  group backends) are loaded, and ends with a full logout when the impersonator is deleted or
+  disabled, loses the permission to impersonate the user, changes the password (checked every
+  `last_check_timeout` minutes, like core does), or the impersonator's own session is revoked.
+- Only the user's own logout (GET /logout with the CSRF token, while the impersonated session is
+  valid) switches back to the impersonator. Security logouts (revoked or invalid session, auth header
+  mismatch, password reset, ...) end the impersonation and log out.
+- The session id and the CSRF token are rotated when the impersonation starts and ends; the old
+  session id keeps no authenticated state, so requests still using it (e.g. queued on the session
+  lock) see an anonymous session instead of logging the browser out. A switch that fails half-way is
+  rolled back and logged out. The impersonator's session token keeps its stored password after
+  switching back, so password changes still invalidate it.
+- The impersonated user's session is listed as "Impersonated by <uid>" in their session list.
+- Users can no longer impersonate themselves or disabled users.
+- The server now honours "Only an administrator is allowed to impersonate users" even if an old group
+  list is still stored.
+- No details about other accounts are revealed to users who are not allowed to impersonate, and the
+  delegation policy is only sent to administrators and allowed group admins.
+- Impersonation start, end and every refusal are logged at warning level with the canonical user ids
+  and the remote address; the raw request parameter is no longer logged.
+- Removed two routes without a working controller (`POST /apps/impersonate/logout`,
+  `POST /apps/impersonate/settings/impersonatetemplate`) that produced HTTP 500 errors and error log
+  entries for anonymous requests.
+- `appinfo/app.php` is guarded so that an error can not break other requests of the instance.
+
+### Changed
+- ownCloud 11.1 support: the group admin options respect the `allow_subadmins` system config
+  (disabled by default in ownCloud 11) and the admin panel shows a hint when it is disabled.
+- Invalid values of `impersonate_include_groups_list` no longer break the "User Authentication" admin
+  settings section (PHP 8 TypeError).
+- The impersonate icon is only shown where the server allows impersonation (not for the user
+  themselves, disabled users, users who never logged in, administrators for group admins, or group
+  admins outside the configured groups); a second click while the request is pending is ignored.
+- The impersonation banner link is clickable again, the markup is valid and user names are no longer
+  double escaped; the column header and the icon tooltip are translatable.
+- Uses `OCP\IConfig::getAppValue()` instead of the deprecated `OCP\IAppConfig::getValue()`.
+- `make dist` builds a reproducible `build/impersonate-<version>.tar.gz` (+ `.sha256`) whose folder is
+  named after the app id (required by the ownCloud 11.1 installer); signing uses an optional
+  `SIGN_CMD` because `occ integrity:sign-app` was removed in ownCloud 11.
+- New CI: PHPUnit, PHPStan, Phan (now including `controller/`), PHP-CS-Fixer, gitleaks, HTTP
+  end-to-end and security checks, Behat API acceptance tests and a headless browser test against
+  ownCloud 11.1.0; signed release tags; release archives built by CI.
+- Unit tests rewritten; acceptance test fixes and new scenarios for ownCloud 11.
+- New maintainer, project URLs, COPYRIGHT and SECURITY.md.
+
+## [0.7.0] - 2026-03-09 (owncloud/impersonate, unreleased upstream)
+
+### Changed
+- Requires ownCloud 11 and PHP 8.3 ([#251](https://github.com/owncloud/impersonate/pull/251),
+  [#254](https://github.com/owncloud/impersonate/pull/254)).
+
+## [0.6.1] - 2026-02-16
+
+### Fixed
+- [#245](https://github.com/owncloud/impersonate/pull/245) - subadmins only impersonate members of their groups
 
 ## [0.6.0] - 2023-12-14
 
@@ -142,7 +217,10 @@ owncloud-impersonate (0.0.2)
 owncloud-impersonate (0.0.1)
 * First release
 
-[Unreleased]: https://github.com/owncloud/impersonate/compare/v0.6.0...master
+[Unreleased]: https://github.com/takenek/impersonate/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/takenek/impersonate/releases/tag/v1.0.0
+[0.7.0]: https://github.com/owncloud/impersonate/compare/v0.6.1...8b137cc
+[0.6.1]: https://github.com/owncloud/impersonate/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/owncloud/impersonate/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/owncloud/impersonate/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/owncloud/impersonate/compare/v0.5.1...v0.5.2

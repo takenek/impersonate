@@ -1,0 +1,15 @@
+# Impersonate - the keys that may sign a release tag (OpenSSH "allowed signers" format,
+# ssh-keygen(1) section ALLOWED SIGNERS). The CI job "release" verifies every release tag against
+# the copy of this file on main:
+#
+#   git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag vX.Y.Z
+#   -> Good "git" signature for impersonate-release with RSA key SHA256:Dh488r7YcvACwpsZov0/TASb3v3FRjz4//bwoQCyPwU
+#
+# The fingerprint is published in SECURITY.md ("Release signing key"): compare it from there and with
+# the maintainer's GitHub signing keys (https://api.github.com/users/takenek/ssh_signing_keys). This
+# file alone, taken from the same clone as the tag, proves nothing.
+#
+# One line per key: the principal impersonate-release, the namespace git, the public key without a
+# comment. Rotation: add the new key's line and extend the old line's options to
+# namespaces="git",valid-before="YYYYMMDD", then publish the new fingerprint in SECURITY.md.
+impersonate-release namespaces="git" ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAEAQC+Q8vB+foq0LtXEJKnOO0Y/TGztuBzdttGHQR6nurvaKZ0CEsrm0JM6fhVWXuF0ZZtNMQr8UYvlXAHZFR9hjDp3ujhiFFLCFZspOHrvcrdVEgw7WV24ZfXHmcF1HCqTVo4ElhaXsNMEtDbJLpZZ27HUXCDRdt9ItcT9jurzI3OXD3OLiVRWUWhO597ny0vumqOLsvSQQQhz3g9FUq4wK9yJfPI/nY+c33x5sq+s/7yNrc3KpApGkFIH8AZOhJl7LapQQhiviHFJi4i2AvNFKLzKI4UzOe5xZwa6YB+FiJlyj4FYCk6Xq54USf59kt/K1ZB3sGMv9ScZf+SFrdSVB0lgdCZja/L11VOp2Tb/VBb97spRTs/nf4SPfTfSHbb5VH675fXlxCJcvipkena0txJEU+IrnoYfbXqTyJbyH0kBWMicv6GlkQGq6y1u7eEA8mJ3atA4Z8wKdOden6yAbhE/NdgUG8tpeLUAYSSY03GG7VZ+inN2ljYm9+q0GJ5oUQV7CTKqBaYdCzZU/ybFo0rmkhgxvScuyf/jQm1pXcn68KolLTq/G9chjVFB/PIPR5k0mTVg7w0U9P8e+zAHdgXZGnapJ0yjJrdJr7l6QdQXYAJxx/xL+UAJVuMklWG+X6KFvQkBuaIoAayXK5DoFOtQjmrMMloSt+o8JyR7ZVU0SddkGu3vvctzQacth2wGb0i3sp/zsyCA11vHNYrxF/yuAysl15BQKASBqhX5zxE0AdtJdif9kpH7+lv8lUAW6rKO0zZPTIeVLdr+b34DJw393wZL5l+Ar1hU/5usg9Sbg23sseAvV46DsAxqrkTNMh615rhvDACL/LSCOo+XMwMUU2Ggls5CHv5jjP1Da8l0HhA2QEv5HOlqvLspqUF1ICl501OUAP2kVJw1UTJdjP0AZY9NwCp18KLWYWMKXTmABHKQLuaO2nI+2hfgTMeC/AS4EOezNm3wFodUWlbCY5rhrlusBLLifhB8oxr+uZBuHT/AIde7zPCyTG2i7eKvU+SH9azsH5cDUM+swl0D1B39nxuUAuEfrufxGKg5A0bqy+/VqDZ4Q7oF9yYkZ6thG5CLsr6LObGNsckPcFbd8g75jFhUNpXd6HQfVRqxZwC0Yut4+0bSjBttxd8ptSuhgArQI9XtfcS9+FJW/h10d5DIRTQA1cyzRY64dGG3CZkNjObstt3iXfuIDn+aJ+nziVK8pHlcX+5/AnYKt1ef701dap9appz/3dC2NETlpkRJr7ogWHnDFWacn5jLV9UqD/L7drrSO5qSu1et7/R3FCJ6iR+PwORxsckuLRBO3KUkUQi8C5MycEFHGKiiBoNLP+Em6MLeUUEPogAH/N8uyvx

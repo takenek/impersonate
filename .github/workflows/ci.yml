@@ -1,0 +1,339 @@
+# CI of Impersonate for ownCloud 11.
+#
+# - read-only token (permissions: contents: read) for every job except "release", no secrets, no
+#   pull_request_target; actions are pinned to full commit SHAs (Dependabot updates them);
+# - every job that needs ownCloud installs the official 11.1.0 QA build (release + tests/ + PHPUnit)
+#   from the owncloud/core GitHub release, verified by its SHA-256 (tests/ci/install-owncloud.sh),
+#   with SQLite, on PHP 8.3 (the only PHP version ownCloud 11.1 runs on);
+# - the throw-away passwords are generated per run and masked;
+# - job "release" (tags v* only, after every other job passed): the tag must be an annotated tag
+#   signed with a key of .github/release-signers as it is on main and name a commit of main, the
+#   versions must match, the archive is built with "make dist", checked against an allow-list,
+#   installed into a fresh ownCloud as README section 2 describes, and published with its SHA-256.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  # weekly run without source changes (Mondays 05:17 UTC)
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  OC_VERSION: '11.1.0'
+  # SHA-256 of owncloud-11.1.0-qa.tar.bz2 as published next to the release asset
+  OC_SHA256: 124424896d3049d79679f35dcaf0e349459fc807799f1ea46a6858bfaa2c192c
+  PHP_EXTENSIONS: ctype, curl, dom, gd, iconv, intl, json, mbstring, openssl, pdo_sqlite, posix, session, simplexml, sqlite3, xml, xmlwriter, zip, zlib, bcmath, gmp
+
+jobs:
+  tests:
+    name: PHPUnit (PHP 8.3, ownCloud 11.1.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          coverage: none
+          tools: none
+      - name: Throw-away passwords
+        run: |
+          for v in ADMIN_PASSWORD USER_PASSWORD; do
+            p=$(openssl rand -hex 16); echo "::add-mask::$p"; echo "$v=$p" >> "$GITHUB_ENV"
+          done
+          echo "OC_DIR=$RUNNER_TEMP/owncloud" >> "$GITHUB_ENV"
+      - name: Build the app (compiled Handlebars templates)
+        run: make build-dep js-templates
+      - name: Install ownCloud and the app
+        run: tests/ci/install-owncloud.sh
+      - name: PHPUnit
+        working-directory: ${{ env.OC_DIR }}/apps/impersonate
+        run: php -d zend.enable_gc=0 ../../lib/composer/bin/phpunit --configuration phpunit.xml --testsuite unit --no-coverage
+
+  phpstan:
+    name: PHPStan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          coverage: none
+          tools: composer:v2
+      - name: Throw-away passwords
+        run: |
+          p=$(openssl rand -hex 16); echo "::add-mask::$p"; echo "ADMIN_PASSWORD=$p" >> "$GITHUB_ENV"
+          echo "OC_DIR=$RUNNER_TEMP/owncloud" >> "$GITHUB_ENV"
+      - name: Build the app and install ownCloud
+        run: |
+          make build-dep js-templates
+          tests/ci/install-owncloud.sh
+      - name: Install PHPStan
+        working-directory: ${{ env.OC_DIR }}/apps/impersonate
+        run: |
+          composer install --no-interaction --no-progress
+          composer bin phpstan install --no-interaction --no-progress
+      - name: PHPStan
+        working-directory: ${{ env.OC_DIR }}/apps/impersonate
+        run: php -d zend.enable_gc=0 vendor-bin/phpstan/vendor/bin/phpstan analyse --memory-limit=4G --configuration=./phpstan.neon --no-progress --level=5 appinfo controller lib
+
+  phan:
+    name: Phan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: ${{ env.PHP_EXTENSIONS }}, ast
+          coverage: none
+          tools: composer:v2
+      - name: Throw-away passwords
+        run: |
+          p=$(openssl rand -hex 16); echo "::add-mask::$p"; echo "ADMIN_PASSWORD=$p" >> "$GITHUB_ENV"
+          echo "OC_DIR=$RUNNER_TEMP/owncloud" >> "$GITHUB_ENV"
+      - name: Build the app and install ownCloud
+        run: |
+          make build-dep js-templates
+          tests/ci/install-owncloud.sh
+      - name: Install Phan
+        working-directory: ${{ env.OC_DIR }}/apps/impersonate
+        run: |
+          composer install --no-interaction --no-progress
+          composer bin phan install --no-interaction --no-progress
+      - name: Phan
+        working-directory: ${{ env.OC_DIR }}/apps/impersonate
+        run: php -d zend.enable_gc=0 -d memory_limit=4G vendor-bin/phan/vendor/bin/phan --config-file .phan/config.php --require-config-exists --allow-polyfill-parser --no-progress-bar
+
+  coding-style:
+    name: PHP-CS-Fixer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+      - name: Install PHP-CS-Fixer (ownCloud coding standard)
+        run: |
+          composer install --no-interaction --no-progress
+          composer bin owncloud-codestyle install --no-interaction --no-progress
+      - name: PHP-CS-Fixer
+        run: php vendor-bin/owncloud-codestyle/vendor/bin/php-cs-fixer fix -v --diff --allow-risky yes --dry-run
+
+  security:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      # SHA-256 of gitleaks_8.30.1_linux_x64.tar.gz as published in the release's checksums file
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install gitleaks (verified by its SHA-256)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          "$RUNNER_TEMP/gitleaks/gitleaks" version
+      # A control: a planted private key must be reported, otherwise the scan below proves nothing.
+      - name: gitleaks detects a planted secret
+        run: |
+          mkdir -p "$RUNNER_TEMP/control"
+          openssl genpkey -algorithm ed25519 -out "$RUNNER_TEMP/control/id_ed25519" 2>/dev/null
+          if "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact "$RUNNER_TEMP/control"; then
+            echo "gitleaks did not report the planted key" >&2
+            exit 1
+          fi
+      - name: Scan the history
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact .'
+      - name: Scan the tree
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact .'
+
+  e2e:
+    name: E2E, security checks, Behat and browser (ownCloud 11.1.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          coverage: none
+          tools: composer:v2
+      - name: Throw-away passwords
+        run: |
+          for v in ADMIN_PASSWORD USER_PASSWORD; do
+            p=$(openssl rand -hex 16); echo "::add-mask::$p"; echo "$v=$p" >> "$GITHUB_ENV"
+          done
+          echo "OC_DIR=$RUNNER_TEMP/owncloud" >> "$GITHUB_ENV"
+          echo "BASE=http://localhost:8080" >> "$GITHUB_ENV"
+      - name: Build the app and install ownCloud
+        run: |
+          make build-dep js-templates
+          tests/ci/install-owncloud.sh
+      - name: Start the PHP web server
+        run: |
+          nohup php -S localhost:8080 -t "$OC_DIR" > "$RUNNER_TEMP/php-server.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf "$BASE/status.php" && break; sleep 1; done
+          curl -sf "$BASE/status.php" | grep -q '"installed":true'
+      # The acceptance tests create Alice, Bob, ... and remove them again: run them before the
+      # end-to-end users exist (user ids are case-insensitive).
+      - name: Behat API acceptance tests
+        working-directory: ${{ env.OC_DIR }}/apps/impersonate
+        run: |
+          php ../../occ app:enable testing
+          composer install --no-interaction --no-progress
+          composer bin behat install --no-interaction --no-progress
+          TEST_SERVER_URL="$BASE" BEHAT_BIN=vendor-bin/behat/vendor/bin/behat \
+            bash ../../tests/acceptance/run.sh --remote --type api
+          php ../../occ app:disable testing
+      - name: End-to-end users
+        run: tests/e2e/setup-users.sh
+      - name: HTTP end-to-end test
+        run: tests/e2e/e2e.sh
+      - name: Security checks
+        run: tests/e2e/security-checks.sh
+      - name: Headless browser test
+        run: |
+          npm install --no-save --no-audit --no-fund playwright-core@1.58.2
+          npx --no-install playwright-core install --with-deps chromium
+          SHOTS="$RUNNER_TEMP/screenshots" node tests/ui/ui-impersonate.js
+      - name: ownCloud log on failure
+        if: failure()
+        run: |
+          tail -n 200 "$OC_DIR/data/owncloud.log" || true
+          tail -n 100 "$RUNNER_TEMP/php-server.log" || true
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots
+          path: ${{ runner.temp }}/screenshots
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release:
+    name: Release (signed tag, archive, publish)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tests, phpstan, phan, coding-style, security, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          coverage: none
+          tools: none
+      - name: The tag is a signed, annotated tag of main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG" main:refs/remotes/origin/main
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag \
+            || { echo "$TAG is a lightweight tag: releases are signed, annotated tags" >&2; exit 1; }
+          # the pinned keys as they are on main, not as the tagged commit has them
+          git show refs/remotes/origin/main:.github/release-signers > "$RUNNER_TEMP/release-signers"
+          git -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/release-signers" verify-tag "$TAG"
+          git merge-base --is-ancestor "refs/tags/$TAG^{commit}" refs/remotes/origin/main \
+            || { echo "$TAG does not name a commit of main" >&2; exit 1; }
+      - name: The versions match the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          V=${TAG#v}
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          grep -q "<version>$V</version>" appinfo/info.xml
+          grep -q "\"version\": \"$V\"" package.json
+          grep -q "^## \[$V\] - " CHANGELOG.md
+      - name: Build the release archive
+        run: make dist
+      - name: The archive holds the app and nothing else
+        run: tests/ci/check-archive.sh "build/impersonate-$VERSION.tar.gz" "$VERSION"
+      - name: The archive installs into ownCloud 11.1.0
+        run: |
+          p=$(openssl rand -hex 16); echo "::add-mask::$p"
+          ADMIN_PASSWORD=$p OC_DIR="$RUNNER_TEMP/owncloud" APP_ARCHIVE="build/impersonate-$VERSION.tar.gz" \
+            tests/ci/install-owncloud.sh
+          php "$RUNNER_TEMP/owncloud/occ" app:list impersonate | grep -q "Version: $VERSION"
+          php "$RUNNER_TEMP/owncloud/occ" integrity:check-app impersonate
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: impersonate-${{ env.VERSION }}
+          path: |
+            build/impersonate-${{ env.VERSION }}.tar.gz
+            build/impersonate-${{ env.VERSION }}.tar.gz.sha256
+          if-no-files-found: error
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          {
+            echo
+            echo "### Download"
+            echo
+            echo "\`impersonate-$VERSION.tar.gz\` (built by CI from the signed tag \`$TAG\`), verify with"
+            echo "\`sha256sum -c impersonate-$VERSION.tar.gz.sha256\` and install as described in the"
+            echo "[README](https://github.com/${GITHUB_REPOSITORY}/blob/$TAG/README.md#2-installation)."
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 "build/impersonate-$VERSION.tar.gz.sha256")\`"
+          } >> "$RUNNER_TEMP/notes.md"
+          files=("build/impersonate-$VERSION.tar.gz" "build/impersonate-$VERSION.tar.gz.sha256")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" --verify-tag --title "Impersonate $VERSION" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi

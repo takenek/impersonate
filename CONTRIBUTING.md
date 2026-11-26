@@ -1,26 +1,15 @@
-## Submitting issues
+# Contributing
 
-If you have questions about how to install or use ownCloud, please direct these to the [mailing list][mailinglist] or our [forum][forum]. We are also available on [IRC][irc].
+Thank you for your interest in Impersonate for ownCloud 11.
 
-### Short version
+* **Security problems:** do not open an issue – report them privately as described in
+  [SECURITY.md](SECURITY.md).
+* **Bugs and feature requests:** open an issue at <https://github.com/takenek/impersonate/issues> with
+  the app version, the ownCloud and PHP versions, steps to reproduce and what you expected.
+* **Pull requests:** keep them focused, add or adjust tests (`tests/unit`, `tests/e2e`,
+  `tests/acceptance`) and make sure CI passes (see README section 5 for running the tests locally).
+  Code style: `make test-php-style-fix`; static analysis: `make test-php-phpstan test-php-phan`.
 
- * The [**issue template can be found here**][template]. Please always use the issue template when reporting issues.
-
-### Guidelines
-* Please search the existing issues first, it's likely that your issue was already reported or even fixed.
-  - Go to one of the repositories, click "issues" and type any word in the top search/command bar.
-  - You can also filter by appending e. g. "state:open" to the search string.
-  - More info on [search syntax within github](https://help.github.com/articles/searching-issues)
-* This repository ([impersonate](https://github.com/owncloud/impersonate/issues)) is *only* for issues within the ownCloud impersonate code.
-* __SECURITY__: Report any potential security bug to security@owncloud.com following our [security policy](https://owncloud.org/security/) instead of filing an issue in our bug tracker
-* Report the issue using our [template][template], it includes all the information we need to track down the issue.
-
-Help us to maximize the effort we can spend fixing issues and adding new features, by not reporting duplicate issues.
-
-[template]: https://raw.github.com/owncloud/core/master/issue_template.md
-[mailinglist]: https://mailman.owncloud.org/mailman/listinfo/owncloud
-[forum]: https://forum.owncloud.org/
-[irc]: https://webchat.freenode.net/?channels=owncloud&uio=d4
-
-### Contribute Code and translations
-Please check [core's contribution guidelines](https://github.com/owncloud/core/blob/master/CONTRIBUTING.md) for further information about contributing code and translations.
+By contributing you agree that your contribution is licensed under the GNU Affero General Public
+License version 3 or later (see [LICENSE](LICENSE) and [COPYRIGHT](COPYRIGHT)), and you may add an
+accurate copyright notice for your contribution without removing existing notices.

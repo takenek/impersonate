@@ -1,28 +1,35 @@
 {
- "name": "Impersonate",
- "version": "0.1.0",
+ "name": "impersonate",
+ "version": "1.0.0",
+ "description": "Impersonate for ownCloud 11",
  "author": {
-  "name": "Jörn Friedrich Dreyer",
-  "email": "jfd@owncloud.com"
+  "name": "Marek Królikowski (TaKeN)",
+  "url": "https://github.com/takenek"
  },
+ "contributors": [
+  {
+   "name": "Jörn Friedrich Dreyer",
+   "email": "jfd@owncloud.com"
+  },
+  {
+   "name": "ownCloud GmbH and contributors"
+  }
+ ],
+ "license": "AGPL-3.0-only",
  "private": true,
- "homepage": "https://github.com/owncloud/impersonate",
- "contributors": [],
+ "homepage": "https://github.com/takenek/impersonate",
+ "repository": {
+  "type": "git",
+  "url": "https://github.com/takenek/impersonate.git"
+ },
  "dependencies": {},
  "devDependencies": {
   "handlebars": "^4.7.9"
  },
- "engine": "node >= 6.9",
  "scripts": {
   "build": "make js-templates"
  },
- "watch": {
-  "build": {
-   "patterns": [
-    "js/templates/*.{js,handlebars}"
-   ],
-   "ignore": "**/*.handlebars.js",
-   "extensions": "js,handlebars"
-  }
+ "engines": {
+  "node": ">= 18"
  }
 }

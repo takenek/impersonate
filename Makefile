@@ -3,17 +3,24 @@ SHELL := /bin/bash
 COMPOSER_BIN := $(shell command -v composer 2> /dev/null)
 
 HANDLEBARS=$(CURDIR)/node_modules/handlebars/bin/handlebars
-appname=$(notdir $(CURDIR))
+# ownCloud 11 only installs archives whose folder is named exactly like the <id> in info.xml
+appname=$(shell sed -n 's:.*<id>\(.*\)</id>.*:\1:p' appinfo/info.xml)
+appversion=$(shell sed -n 's:.*<version>\(.*\)</version>.*:\1:p' appinfo/info.xml)
+archive=build/$(appname)-$(appversion).tar.gz
+# reproducible archives: fixed order, owner and (with SOURCE_DATE_EPOCH) timestamps
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null)
+TAR_REPRO=--sort=name --owner=0 --group=0 --numeric-owner $(if $(SOURCE_DATE_EPOCH),--mtime=@$(SOURCE_DATE_EPOCH))
 
 
 # composer
 acceptance_test_deps=vendor-bin/behat/vendor
 
-occ=$(CURDIR)/../../occ
-private_key=$(HOME)/.owncloud/certificates/$(appname).key
-certificate=$(HOME)/.owncloud/certificates/$(appname).crt
-sign=php -f $(occ) integrity:sign-app --privateKey="$(private_key)" --certificate="$(certificate)"
-sign_skip_msg="Skipping signing, either no key and certificate found in $(private_key) and $(certificate) or occ can not be found at $(occ)"
+# Code signing: ownCloud 11 removed "occ integrity:sign-app"; packages must be signed
+# with ownCloud's external G2 signing tooling and a certificate issued by ownCloud.
+# Set SIGN_CMD to a command that signs the directory passed as its last argument,
+# e.g. make dist SIGN_CMD="/path/to/signer --key ... --cert ...". Unsigned packages
+# can still be deployed manually (see README.md).
+SIGN_CMD ?=
 template_src=$(wildcard js/templates/*.handlebars)
 app_namespace=Impersonate
 js_namespace=OCA.$(app_namespace)
@@ -21,17 +28,9 @@ NODE_PREFIX=$(shell pwd)
 
 NPM := $(shell command -v npm 2> /dev/null)
 
-ifneq (,$(wildcard $(private_key)))
-ifneq (,$(wildcard $(certificate)))
-ifneq (,$(wildcard $(occ)))
-	CAN_SIGN=true
-endif
-endif
-endif
-
 # bin file definitions
-PHPUNIT=php -d zend.enable_gc=0  "$(PWD)/../../lib/composer/bin/phpunit"
-PHPUNITDBG=phpdbg -qrr -d memory_limit=4096M -d zend.enable_gc=0 "$(PWD)/../../lib/composer/bin/phpunit"
+PHPUNIT=php -d zend.enable_gc=0  "$(CURDIR)/../../lib/composer/bin/phpunit"
+PHPUNITDBG=phpdbg -qrr -d memory_limit=4096M -d zend.enable_gc=0 "$(CURDIR)/../../lib/composer/bin/phpunit"
 PHP_CS_FIXER=php -d zend.enable_gc=0 vendor-bin/owncloud-codestyle/vendor/bin/php-cs-fixer
 PHAN=php -d zend.enable_gc=0 vendor-bin/phan/vendor/bin/phan
 PHPSTAN=php -d zend.enable_gc=0 vendor-bin/phpstan/vendor/bin/phpstan
@@ -47,8 +46,8 @@ help: ## Show this help message
 # Catch-all rules
 #
 .PHONY: dist
-dist: ## Build distribution and create tar file impersonate.tar.gz
-dist: build-dep js-templates build-src
+dist: ## Build the release archive build/impersonate-<version>.tar.gz (+ .sha256)
+dist: build-dep clean-templates js-templates build-src
 
 %.js: $(template_src)
 		$(HANDLEBARS) -n "$(js_namespace)" $* -f $@
@@ -63,9 +62,9 @@ build-dep: ## fetch all dependencies
 build-dep: node_modules
 
 node_modules: package.json package-lock.json
-		$(NPM) install --prefix=$(NODE_PREFIX) && touch $@
+		$(NPM) ci --no-audit --no-fund --prefix=$(NODE_PREFIX) && touch $@
 
-PHONY: js-templates
+.PHONY: js-templates
 js-templates: ## build templates for frontend
 js-templates: $(addsuffix .js, $(template_src))
 
@@ -103,6 +102,7 @@ clean-templates:
 # build source package
 #
 build-src: ## Build source package
+	rm -rf build/$(appname) build/$(appname)-*.tar.gz*
 	mkdir -p build/$(appname)
 	cp --parents -r \
 		appinfo \
@@ -114,16 +114,20 @@ build-src: ## Build source package
 		lib \
 		README.md \
 		LICENSE \
+		COPYRIGHT \
+		AUTHORS.md \
 		CHANGELOG.md \
 		templates \
 		build/$(appname)
 	rm -Rf build/$(appname)/js/templates/*.handlebars build/$(appname)/l10n/.tx
-ifdef CAN_SIGN
-	$(sign) --path="$(CURDIR)/build/$(appname)"
+ifneq (,$(SIGN_CMD))
+	$(SIGN_CMD) "$(CURDIR)/build/$(appname)"
 else
-	@echo $(sign_skip_msg)
+	@echo "Skipping signing (SIGN_CMD not set). See README.md for installing an unsigned package on ownCloud 11."
 endif
-	tar --format=gnu -czf build/$(appname).tar.gz -C $(CURDIR)/build/$(appname) ../$(appname)
+	tar --format=gnu $(TAR_REPRO) -cf - -C $(CURDIR)/build $(appname) | gzip -9n > $(archive)
+	cd build && sha256sum $(notdir $(archive)) > $(notdir $(archive)).sha256
+	@echo "built $(archive)"
 
 .PHONY: clean-build
 clean-build:

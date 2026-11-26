@@ -1,0 +1,13 @@
+# GitHub source archives contain only what an ownCloud installation needs (the release archive is
+# built by "make dist" and attached to the GitHub release; the source archive can build it): tests,
+# CI and developer tooling are excluded.
+/tests export-ignore
+/vendor-bin export-ignore
+/.github export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.phan export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/phpstan.neon export-ignore
+/phpunit.xml export-ignore
+/screenshot export-ignore
