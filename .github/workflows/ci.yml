@@ -182,9 +182,9 @@ jobs:
             exit 1
           fi
       - name: Scan the history
-        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact .'
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact --verbose .'
       - name: Scan the tree
-        run: '"$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact .'
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --verbose .'
 
   e2e:
     name: E2E, security checks, Behat and browser (ownCloud 11.1.0)
