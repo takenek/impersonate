@@ -24,7 +24,7 @@
  },
  "dependencies": {},
  "devDependencies": {
-  "handlebars": "^4.7.9"
+  "handlebars": "^4.7.10"
  },
  "scripts": {
   "build": "make js-templates"
