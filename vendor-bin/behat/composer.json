@@ -7,14 +7,14 @@
     "require": {
         "behat/behat": "^3.31",
         "behat/gherkin": "^4.9",
-        "behat/mink": "1.7.1",
+        "behat/mink": "1.13.0",
         "friends-of-behat/mink-extension": "^2.7",
         "behat/mink-selenium2-driver": "^1.5",
         "ciaranmcnulty/behat-stepthroughextension" : "dev-master#4c0df28e016c567c417cbccd49e480c0649f531e",
         "rdx/behat-variables": "^1.2",
         "sensiolabs/behat-page-object-extension": "^2.3",
         "symfony/translation": "^5.4",
-        "sabre/xml": "^2.2",
+        "sabre/xml": "^4.1",
         "guzzlehttp/guzzle": "^7.12",
         "phpunit/phpunit": "^9.6",
         "helmich/phpunit-json-assert": "^3.5"
