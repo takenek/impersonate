@@ -124,7 +124,7 @@ class ActiveImpersonations {
 		$fetchAll = \method_exists($result, 'fetchAllAssociative') ? 'fetchAllAssociative' : 'fetchAll';
 		$rows = $result->$fetchAll();
 		foreach (['free', 'closeCursor'] as $release) {
-			if (\method_exists($result, $release)) {
+			if (\is_object($result) && \method_exists($result, $release)) {
 				$result->$release();
 				break;
 			}
