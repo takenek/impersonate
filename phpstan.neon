@@ -4,3 +4,7 @@ parameters:
     - %currentWorkingDirectory%/../../lib/base.php
   excludePaths:
     - %currentWorkingDirectory%/appinfo/routes.php
+  # The PHPDoc types of ownCloud are not enforced at runtime (request parameters, app config
+  # values, results of the database layer): the app checks such values, PHPStan must not treat
+  # those checks as redundant.
+  treatPhpDocTypesAsCertain: false
