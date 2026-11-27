@@ -159,6 +159,10 @@ one – so the restored session stays password-bound (a later password change st
   may administer other groups, so the impersonator would act on groups that were not delegated to
   them. The option "Allow group admins to impersonate members who are group admins themselves"
   accepts this.
+* **What a group admin who may impersonate is told** – the users page receives the ids of the
+  members of their groups whom they cannot impersonate (administrators and, unless the option above
+  is set, group admins), so that it shows no icon for them. Users who cannot impersonate and
+  impersonated sessions get an empty answer.
 * **Sessions without a login password** (e.g. single sign-on) – the impersonator's password cannot
   be re-checked, and the session restored afterwards is not bound to one. Such impersonations end by
   the maximum duration; do not set it to `0` on instances with such logins.
