@@ -14,7 +14,7 @@
         "rdx/behat-variables": "^1.2",
         "sensiolabs/behat-page-object-extension": "^2.3",
         "symfony/translation": "^5.4",
-        "sabre/xml": "^2.2",
+        "sabre/xml": "^4.1",
         "guzzlehttp/guzzle": "^7.12",
         "phpunit/phpunit": "^9.6",
         "helmich/phpunit-json-assert": "^3.5"
