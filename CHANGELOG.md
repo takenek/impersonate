@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The occ command `impersonate:active` is registered with `addCommand()` of Symfony Console:
+  `add()` is deprecated since Symfony 7.4, which every ownCloud 11 release ships, and Symfony 8
+  removes it. If occ does not provide its console application, the error is logged and occ keeps
+  working, as before.
+
 ## [1.0.2] - 2026-11-27
 
 Bug fix release. It fixes a defect of 1.0.1 that the verification of its fixes found, completes the
