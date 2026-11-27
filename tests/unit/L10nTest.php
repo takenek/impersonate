@@ -23,10 +23,69 @@ use Test\TestCase;
  * The translations are filled into the page by name: "{currentUser}" in the
  * source text must be "{currentUser}" in every translation, otherwise e.g. the
  * banner does not show whom the session impersonates.
+ *
+ * A text without a translation is shown in English. In a complete translation
+ * (COMPLETE_LOCALES) that must not happen: a dialog would be half translated,
+ * e.g. the confirmation that names the account to impersonate.
  */
 class L10nTest extends TestCase {
+	/** locales that have to hold every text of the app, and nothing else */
+	private const COMPLETE_LOCALES = ['pl'];
+
+	private static function appDir(): string {
+		return \dirname(__DIR__, 2);
+	}
+
 	private static function l10nDir(): string {
-		return \dirname(__DIR__, 2) . '/l10n';
+		return self::appDir() . '/l10n';
+	}
+
+	/**
+	 * How the code passes a text to the translation functions, per kind of source: the pattern of a
+	 * call with a text the test can read (a single-quoted literal), the pattern of any call, and the
+	 * files. JavaScript: t('impersonate', '...'); PHP: ->t('...').
+	 */
+	private const CALLS = [
+		[
+			'/\bt\(\s*\'impersonate\',\s*\'((?:[^\'\\\\]|\\\\.)*)\'/s',
+			'/\b[tn]\(\s*[\'"`]impersonate[\'"`]/',
+			['js/*.js'],
+		],
+		[
+			'/->t\(\s*\'((?:[^\'\\\\]|\\\\.)*)\'/s',
+			'/->[tn]\(/',
+			['appinfo/*.php', 'controller/*.php', 'lib/*.php', 'lib/*/*.php', 'templates/*.php'],
+		],
+	];
+
+	/**
+	 * @return string[] the files of the given globs
+	 */
+	private static function files(array $globs): array {
+		$files = [];
+		foreach ($globs as $glob) {
+			foreach (\glob(self::appDir() . '/' . $glob) ?: [] as $file) {
+				$files[] = $file;
+			}
+		}
+		return $files;
+	}
+
+	/**
+	 * @return string[] the texts the code passes to the translation functions
+	 */
+	private static function sourceTexts(): array {
+		$texts = [];
+		foreach (self::CALLS as [$pattern, , $globs]) {
+			foreach (self::files($globs) as $file) {
+				\preg_match_all($pattern, (string)\file_get_contents($file), $matches);
+				foreach ($matches[1] as $text) {
+					// the text as the code means it: without the escaping of the string literal
+					$texts[\strtr($text, ["\\'" => "'", '\\\\' => '\\'])] = true;
+				}
+			}
+		}
+		return \array_map('strval', \array_keys($texts));
 	}
 
 	/**
@@ -49,6 +108,67 @@ class L10nTest extends TestCase {
 
 	public function testThereAreTranslations(): void {
 		$this->assertGreaterThan(30, \count(self::localeProvider()));
+	}
+
+	public function testTheTextsOfTheAppAreFound(): void {
+		$sources = self::sourceTexts();
+		// one of each kind: JavaScript, the controller, a template (with an escaped quote), a class of lib/
+		foreach ([
+			'Do you want to log in as user "{user}"? Everything you do until you log out is done as this user.',
+			'Can not impersonate a disabled user',
+			'The group admin feature of this server is disabled (config.php: \'allow_subadmins\' => false), so only administrators can impersonate users. Set \'allow_subadmins\' => true to use the group admin options.',
+			'"%s" was revoked for security reasons at the end of an impersonation of your account. If you created it yourself, please create it again.',
+		] as $text) {
+			$this->assertContains($text, $sources);
+		}
+	}
+
+	/**
+	 * The completeness test below only knows the texts it can read. A call in another form (a text
+	 * in double quotes or in a variable, a plural) must not go unnoticed: write it as the others are.
+	 */
+	public function testEveryTranslationCallHasATextTheTestCanRead(): void {
+		foreach (self::CALLS as [$readable, $any, $globs]) {
+			foreach (self::files($globs) as $file) {
+				$code = (string)\file_get_contents($file);
+				$this->assertSame(
+					\preg_match_all($any, $code),
+					\preg_match_all($readable, $code),
+					\basename($file) . ': a translation call whose text is not a single-quoted literal'
+				);
+			}
+		}
+	}
+
+	public static function completeLocaleProvider(): array {
+		$locales = [];
+		foreach (self::COMPLETE_LOCALES as $locale) {
+			$locales[$locale] = [$locale];
+		}
+		return $locales;
+	}
+
+	/**
+	 * @dataProvider completeLocaleProvider
+	 */
+	public function testACompleteTranslationHoldsEveryTextOfTheApp(string $locale): void {
+		$json = \json_decode((string)\file_get_contents(self::l10nDir() . "/$locale.json"), true);
+		$this->assertIsArray($json['translations'] ?? null);
+		$translations = $json['translations'];
+		$sources = self::sourceTexts();
+		$this->assertSame(
+			[],
+			\array_values(\array_diff($sources, \array_keys($translations))),
+			"$locale.json: texts of the app without a translation (they would be shown in English)"
+		);
+		$this->assertSame(
+			[],
+			\array_values(\array_diff(\array_map('strval', \array_keys($translations)), $sources)),
+			"$locale.json: translations of texts the app does not use (anymore)"
+		);
+		foreach ($translations as $source => $translation) {
+			$this->assertNotSame('', \trim((string)$translation), "$locale.json: empty translation of \"$source\"");
+		}
 	}
 
 	/**

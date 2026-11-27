@@ -69,6 +69,11 @@ class ImpersonationGuard {
 	private const LOGOUT_PATH = '/logout';
 	/** more request values in the shape of a session id than this are not looked up: the request is refused */
 	private const MAX_PARAMETER_CANDIDATES = 256;
+	/**
+	 * Entry points whose requests carry a file or a WebDAV document in their body, of any size,
+	 * and their credentials in a header: the body is not examined there
+	 */
+	private const WEBDAV_ENTRY_POINTS = ['remote.php', 'public.php'];
 
 	private const MESSAGES = [
 		self::FORBIDDEN_REQUEST => 'This action is not allowed while impersonating a user',
@@ -288,6 +293,8 @@ class ImpersonationGuard {
 	 * any further: it is refused (the lookups must not be a way to make the
 	 * server work, and no value may hide behind others).
 	 *
+	 * Which parameters are examined: see requestParameters().
+	 *
 	 * @param int[] $lengths lengths of the ids of the impersonated sessions
 	 * @return string[]
 	 * @throws RefusedException if the request has too many candidates
@@ -295,7 +302,7 @@ class ImpersonationGuard {
 	private function presentedParameters(array $lengths): array {
 		$pattern = self::sessionIdPattern();
 		$candidates = [];
-		$parameters = $this->request->getParams();
+		$parameters = $this->requestParameters();
 		\array_walk_recursive($parameters, static function ($value) use (&$candidates, $pattern, $lengths): void {
 			if (!\is_string($value)) {
 				return;
@@ -313,6 +320,66 @@ class ImpersonationGuard {
 			throw new RefusedException('too many request values in the shape of a session id while an impersonation is active');
 		}
 		return \array_map('strval', \array_keys($candidates));
+	}
+
+	/**
+	 * The parameters of the request: what the platform hands to its controllers
+	 * as parameters (query, form, a JSON or form encoded body).
+	 *
+	 * This runs for every request of every user while an impersonation is
+	 * recorded, so it must not change what happens to the request. The platform
+	 * is therefore not asked for the parameters (IRequest::getParams()) where
+	 * the body is no set of parameters:
+	 *
+	 * - a PUT request with a body that is neither JSON nor form encoded: the
+	 *   platform hands such a body out as a stream, once, and asking for the
+	 *   parameters counts as that one time - the request would be refused here
+	 *   or fail later (an upload through a public link, for example);
+	 * - a request to a WebDAV entry point: its body is a file or a WebDAV
+	 *   document of any size, and decoding it (a large JSON file) can take
+	 *   more memory than the request may use.
+	 *
+	 * For those only the parameters PHP itself has parsed are examined (query
+	 * and form). Credentials of such requests travel in a header or in the
+	 * session, which are always examined (presentedCredentials(),
+	 * Util::getSessionSecrets()).
+	 *
+	 * @return array<mixed>
+	 */
+	private function requestParameters(): array {
+		$entryPoint = \strtolower(\basename((string)($_SERVER['SCRIPT_FILENAME'] ?? '')));
+		if (\in_array($entryPoint, self::WEBDAV_ENTRY_POINTS, true) || $this->hasRawPutBody()) {
+			return [$_GET, $_POST];
+		}
+		return $this->request->getParams();
+	}
+
+	/**
+	 * Is this a PUT request whose body the platform does not decode into parameters?
+	 *
+	 * Only if nothing says otherwise: the content type is taken from every place
+	 * it can come from (the platform's view of the header and both names a web
+	 * server may hand it over under). If any of them names JSON or a form, the
+	 * platform is asked for the parameters as before.
+	 */
+	private function hasRawPutBody(): bool {
+		if (\strtoupper((string)$this->request->getMethod()) !== 'PUT') {
+			return false;
+		}
+		$types = [
+			$this->request->getHeader('Content-Type'),
+			$_SERVER['CONTENT_TYPE'] ?? null,
+			$_SERVER['HTTP_CONTENT_TYPE'] ?? null,
+		];
+		foreach ($types as $type) {
+			$type = \is_string($type) ? \strtolower($type) : '';
+			if (\strpos($type, 'application/json') !== false
+				|| \strpos($type, 'application/x-www-form-urlencoded') !== false
+			) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**

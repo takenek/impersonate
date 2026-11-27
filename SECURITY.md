@@ -35,14 +35,14 @@ as the tag, proves nothing.
 
 ```bash
 # the archive matches the checksum published with the release
-sha256sum -c impersonate-1.0.1.tar.gz.sha256
+sha256sum -c impersonate-1.0.2.tar.gz.sha256
 
 # the tag is signed by the release key
 git clone https://github.com/takenek/impersonate.git && cd impersonate
-git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag v1.0.1
+git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag v1.0.2
 
 # the archive can be rebuilt from the tag (reproducible: same content, same checksum)
-git checkout v1.0.1 && make dist && cat build/impersonate-1.0.1.tar.gz.sha256
+git checkout v1.0.2 && make dist && cat build/impersonate-1.0.2.tar.gz.sha256
 ```
 
 CI builds the archive from the commit the verified tag names and never replaces an archive that is
@@ -135,7 +135,13 @@ of the session. The app is designed so that
    token outside the impersonated session (as its session, in an `Authorization` header or in a
    request parameter) is refused with HTTP 401 and ends the impersonation (a request with more than
    256 parameter values in the shape of a session id is not examined but refused with HTTP 503
-   while an impersonation is recorded); an impersonated session that is not bound to
+   while an impersonation is recorded; this refusal alone is logged at info level, so that an
+   anonymous client cannot fill the log). Request parameters are the query, a form and a JSON or
+   form-encoded body, as ownCloud hands them to its controllers. The body of a WebDAV request
+   (`remote.php`, `public.php`) and a `PUT` body of any other type are files and are not decoded:
+   of such requests the query and a form that PHP itself has parsed are examined, and their
+   credentials travel in a header or in the session. An
+   impersonated session that is not bound to
    the token it was started with anymore (e.g. its id changed) or whose record is gone is ended on
    its next request; and every end – by logout, by the checks of point 4 or by the background job –
    revokes the token by its id. Requests outside an impersonation are not affected otherwise; while
@@ -232,5 +238,12 @@ fixed within the plugin is fixed in 1.0.1 ([CHANGELOG.md](CHANGELOG.md), 1.0.1).
 decided from the plugin's code is stated above as it is: the deny-list is a list (point 3), and the
 behaviour of ownCloud itself, of other apps and of a concrete installation was not part of the
 review. An automated review is not a certification.
+
+Version 1.0.2 is the result of the verification of these fixes on 2026-11-27: every finding was
+compared with the code again and the tests were repeated on ownCloud 11.1.0 – also behind Apache
+with URL rewriting and with server-side encryption (master key). The fixes held, with one defect:
+while an impersonation was active, the check of point 8 changed how requests of everybody else
+were handled (an upload through a public link was refused). 1.0.2 fixes that
+([CHANGELOG.md](CHANGELOG.md), 1.0.2).
 
 `tests/e2e/security-checks.sh` checks the properties above on a live instance in CI.

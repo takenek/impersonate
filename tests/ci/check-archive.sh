@@ -9,7 +9,7 @@
 # below (one folder "impersonate", required by the ownCloud 11 installer), the compiled templates
 # must be there and the version must be the expected one.
 #
-#   tests/ci/check-archive.sh build/impersonate-1.0.1.tar.gz 1.0.1
+#   tests/ci/check-archive.sh build/impersonate-1.0.2.tar.gz 1.0.2
 set -euo pipefail
 archive=${1:?archive}
 version=${2:?version}

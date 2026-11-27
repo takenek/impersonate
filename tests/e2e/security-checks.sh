@@ -11,7 +11,8 @@
 # duration, invalid targets, removed routes, policy disclosure and storage, malformed configuration,
 # starts without an interactive session, concurrent requests during the switch, the credential
 # cleanup and its notification, impersonations that end without a logout (reconcile job, occ),
-# the session token of an impersonation used outside its session.
+# the session token of an impersonation used outside its session, requests of other users while
+# somebody is impersonated.
 # Expects the users of setup-users.sh. Environment: see lib.sh. Uses only throw-away rv* accounts
 # and e2e-* fixtures.
 . "$(dirname "$0")/lib.sh"
@@ -27,6 +28,8 @@ restore() {
 	occ config:app:delete impersonate allow_start_with_credentials >/dev/null 2>&1
 	occ config:system:set allow_subadmins --value=true --type=boolean >/dev/null
 	ocs_admin -X DELETE "$BASE/ocs/v1.php/cloud/users/alice/subadmins" -d groupid=g2 >/dev/null 2>&1
+	# the folder of section Q (its public link goes with it)
+	curl -s -o /dev/null -u "alice:$USER_PASSWORD" -X DELETE "$BASE/remote.php/webdav/e2e-drop"
 	occ impersonate:active --end >/dev/null 2>&1
 	sqlx "delete from oc_authtoken where name like 'e2e-%'" 2>/dev/null
 	sqlx "delete from oc_notifications where app='impersonate'" 2>/dev/null
@@ -59,12 +62,18 @@ check "$(sql "select count(*) from oc_jobs where class like '%Impersonate%Reconc
 echo "== B. no lasting credentials can be obtained while impersonating"
 BEFORE=$(sql "select count(*) from oc_authtoken where uid='alice' and type=1")
 REFUSED=$(log_count 'Refused POST /settings/personal/authtokens for user "alice" while "admin" impersonates them')
+# Does the web server hand URLs without the front controller to the platform (URL rewriting, as
+# Apache does with the .htaccess of ownCloud)? Then the personal settings answer under such a URL.
+REWRITES=$(curl -s -o /dev/null -w '%{http_code}' -b "$A" -c "$A" "$BASE/settings/personal")
 # refused <code> <path>: 403 comes from the app. For the forms a web server may reject or tidy up
-# itself (encoded slash, dot segments) its own 404 is as good: the request never arrives.
+# itself (encoded slash, dot segments) its own 404 is as good: the request never arrives. The same
+# goes for a URL without the front controller on a web server that does not rewrite such URLs (the
+# PHP web server of CI): where they are rewritten, only the 403 of the app counts.
 refused() {
 	case "$2" in
 		*%2F*|*/./*|*/../*) [ "$1" = 403 ] || [ "$1" = 404 ] ;;
-		*) [ "$1" = 403 ] ;;
+		/index.php/*|/ocs/v1.php/*|/ocs/v2.php/*) [ "$1" = 403 ] ;;
+		*) [ "$1" = 403 ] || { [ "$REWRITES" != 200 ] && [ "$1" = 404 ]; } ;;
 	esac
 }
 # every form of the path under which the platform could reach the operation (and forms it does not
@@ -73,23 +82,35 @@ for path in /index.php/settings/personal/authtokens /index.php//settings/persona
 	/index.php/settings/personal/authtoken%73 /index.php/settings/personal%2Fauthtokens \
 	/index.php/settings/personal/authtokens/ /index.php/settings//personal//authtokens \
 	/index.php/Settings/Personal/AuthTokens /index.php/index.php/settings/personal/authtokens \
-	/index.php/settings/personal/./authtokens /index.php/settings/personal/x/../authtokens; do
+	/index.php/settings/personal/./authtokens /index.php/settings/personal/x/../authtokens \
+	/settings/personal/authtokens /settings//personal/authtokens /settings/personal/authtokens/ \
+	/Settings/Personal/AuthTokens /ocs/v1.php/settings/personal/authtokens; do
 	code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' -b "$A" -c "$A" -H "requesttoken: $(token "$A")" -X POST "$BASE$path" -d name=e2e-evil)
 	refused "$code" "$path" && ok "POST $path refused ($code)" || bad "POST $path -> $code"
 done
 check "$(sql "select count(*) from oc_authtoken where uid='alice' and type=1")" "$BEFORE" "no app password created for alice"
 for path in /ocs/v1.php/cloud/user/signing-key /ocs/v2.php/cloud/user/signing-key /ocs/v1.php//cloud/user/signing-key \
 	/ocs/v1.php/cloud/user%2Fsigning-key /ocs/v1.php/cloud/user/signing%2Dkey /ocs/v1.php/cloud/user/signing-key/ \
-	/ocs/v1.php/Cloud/User/Signing-Key /index.php/ocs/cloud/user/signing-key /index.php/ocs/v1.php/cloud/user/signing-key; do
+	/ocs/v1.php/Cloud/User/Signing-Key /index.php/ocs/cloud/user/signing-key /index.php/ocs/v1.php/cloud/user/signing-key \
+	/cloud/user/signing-key /ocs/cloud/user/signing-key; do
 	for method in GET POST; do
 		code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' -b "$A" -c "$A" -H 'OCS-APIREQUEST: true' -H "requesttoken: $(token "$A")" -X "$method" "$BASE$path?format=json")
 		refused "$code" "$path" && ok "$method $path refused ($code)" || bad "$method $path -> $code"
 	done
 done
-check "$(sql "select count(*) from oc_preferences where userid='alice' and configkey='signing-key'")" 0 "no URL signing key created for alice"
-for path in /index.php/apps/oauth2/authorize /index.php/apps/OAuth2/authorize /index.php/apps/oauth2; do
-	check "$(curl -s -o /dev/null -w '%{http_code}' -b "$A" -c "$A" "$BASE$path")" 403 "GET $path refused"
+# forms the OCS API answers itself without reaching the operation (its answer is always 200): no key
+for path in /ocs/v1.php/cloud/user/signing-key.json /ocs/v1.php/cloud/user/signing-key/x; do
+	curl -s --path-as-is -o /dev/null -b "$A" -c "$A" -H 'OCS-APIREQUEST: true' -H "requesttoken: $(token "$A")" "$BASE$path?format=json"
 done
+check "$(sql "select count(*) from oc_preferences where userid='alice' and configkey='signing-key'")" 0 "no URL signing key created for alice"
+for path in /index.php/apps/oauth2/authorize /index.php/apps/OAuth2/authorize /index.php/apps/oauth2 \
+	/apps/oauth2/authorize /apps/OAuth2/authorize; do
+	code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' -b "$A" -c "$A" "$BASE$path")
+	refused "$code" "$path" && ok "GET $path refused ($code)" || bad "GET $path -> $code"
+done
+# the login form without the front controller (section C3 sends it with the front controller)
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$A" -c "$A" -X POST "$BASE/login" --data-urlencode "user=alice" --data-urlencode "password=not-the-password" --data-urlencode "requesttoken=$(token "$A")")
+refused "$code" /login && ok "POST /login refused ($code)" || bad "POST /login -> $code"
 # what the operator added to the deny-list (app config "forbidden_prefixes")
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$A" -c "$A" "$BASE/index.php/apps/e2e-forbidden/x")
 [ "$code" != 403 ] && ok "a path that is not on the deny-list is not refused by the guard ($code)" || bad "GET /apps/e2e-forbidden/x -> $code without a deny-list entry"
@@ -371,6 +392,8 @@ check "$(sql "select count(*) from oc_notifications where app='impersonate' and 
 login "$Bj" alice "$USER_PASSWORD"
 curl -s -b "$Bj" -H 'OCS-APIREQUEST: true' "$BASE/ocs/v2.php/apps/notifications/api/v1/notifications?format=json" > "$W/notifications"
 command grep -q 'e2e-during.* was revoked for security reasons' "$W/notifications" && ok "the notification names the revoked app password" || bad "notification text not found"
+command grep -q -E 'The session .{1,2}e2e-derived-session.{1,2} of your account was ended' "$W/notifications" && ok "... another one the session that was ended" || bad "no notification about the ended session"
+command grep -q 'The URL signing key of your account was removed' "$W/notifications" && ok "... and one says that the URL signing key was removed" || bad "no notification about the URL signing key"
 sqlx "delete from oc_notifications where app='impersonate'"
 sqlx "delete from oc_authtoken where name like 'e2e-%'"
 
@@ -493,5 +516,55 @@ check "$(curl -s -u "alice:$(rawsid "$own")" -H 'OCS-APIREQUEST: true' "$BASE/oc
 check "$(whoami_ "$own")" alice "other sessions are not affected"
 check "$(whoami_ "$A")" bob "... and neither is the impersonation"
 logout "$A" >/dev/null; check "$(whoami_ "$A")" admin "admin returned"
+
+echo "== Q. the requests of everybody else get the answer they get without an impersonation"
+# The check of section P looks at every request of the instance while an impersonation is active. It
+# must not change what happens to them: the platform hands the body of a PUT request that is neither
+# JSON nor a form out once (an upload through a public link was refused, a request to the OCS API
+# was answered differently), and the body of a WebDAV request is a file that must not be decoded.
+curl -s -o /dev/null -u "alice:$USER_PASSWORD" -X MKCOL "$BASE/remote.php/webdav/e2e-drop"
+LINK=$(curl -s -u "alice:$USER_PASSWORD" -H 'OCS-APIREQUEST: true' -X POST "$BASE/ocs/v1.php/apps/files_sharing/api/v1/shares?format=json" -d path=/e2e-drop -d shareType=3 -d permissions=15 \
+	| php -r '$j = json_decode(stream_get_contents(STDIN), true); echo is_string($j["ocs"]["data"]["token"] ?? null) ? $j["ocs"]["data"]["token"] : "";')
+[ -n "$LINK" ] && ok "alice shares a folder by a public link that allows uploads" || bad "no public link for the test"
+# the token of a public link is its user name, the password is empty
+LINK_AUTH="$LINK:"
+# a JSON file whose values have the shape of a session id: a check that decoded it would find more
+# values than it looks up and refuse the request (section P)
+JSON_FILE=$(php -r '
+	$length = (int)ini_get("session.sid_length");
+	$length = $length >= 22 && $length <= 256 ? $length : 32;
+	$values = [];
+	for ($i = 0; $i < 300; $i++) { $values["d$i"] = substr(str_repeat(md5("decoy $i"), 8), 0, $length); }
+	echo json_encode($values);
+')
+others() { # <tag>: the answers to requests that have nothing to do with the impersonation
+	local t body='{"e2e":1}'
+	for t in application/octet-stream text/plain application/json; do
+		echo "public link PUT $t $(curl -s -o /dev/null -w '%{http_code}' -u "$LINK_AUTH" -X PUT -H "Content-Type: $t" --data-binary "$body" "$BASE/public.php/webdav/e2e-$1-${t##*/}")"
+		echo "WebDAV PUT $t $(curl -s -o /dev/null -w '%{http_code}' -u "alice:$USER_PASSWORD" -X PUT -H "Content-Type: $t" --data-binary "$body" "$BASE/remote.php/webdav/e2e-drop/own-$1-${t##*/}")"
+		echo "anonymous PUT $t $(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Content-Type: $t" --data-binary "$body" "$BASE/index.php/apps/impersonate/nothing")"
+	done
+	echo "public link PUT JSON file $(curl -s -o /dev/null -w '%{http_code}' -u "$LINK_AUTH" -X PUT -H 'Content-Type: application/json' --data-binary "$JSON_FILE" "$BASE/public.php/webdav/e2e-$1-file.json")"
+	echo "WebDAV PUT JSON file $(curl -s -o /dev/null -w '%{http_code}' -u "alice:$USER_PASSWORD" -X PUT -H 'Content-Type: application/json' --data-binary "$JSON_FILE" "$BASE/remote.php/webdav/e2e-drop/own-$1-file.json")"
+	# a body that holds no parameters, sent to an operation of the OCS API (it changes nothing; the
+	# platform itself writes a PHP warning to its log for this request, with or without the app)
+	echo "OCS PUT text/plain $(curl -s -o "$W/ocs" -w '%{http_code}' -u "alice:$USER_PASSWORD" -H 'OCS-APIREQUEST: true' -X PUT -H 'Content-Type: text/plain' --data-binary e2e "$BASE/ocs/v1.php/cloud/users/alice?format=json") $(php -r '$j = json_decode((string)@file_get_contents($argv[1]), true); echo is_array($j) ? ($j["ocs"]["meta"]["statuscode"] ?? "no status") : "no answer of the API";' "$W/ocs")"
+	echo "public link PROPFIND $(curl -s -o /dev/null -w '%{http_code}' -u "$LINK_AUTH" -X PROPFIND -H 'Depth: 1' "$BASE/public.php/webdav/")"
+}
+others without > "$W/others-without"
+command grep -q '^public link PUT application/octet-stream 201$' "$W/others-without" && ok "an upload through the public link works" || bad "the upload through the public link failed: $(command grep '^public link PUT' "$W/others-without" | tr '\n' ' ')"
+login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" bob)" 200 "admin impersonates bob"
+others during > "$W/others-during"
+check "$(command grep '^public link PUT application/octet-stream ' "$W/others-during")" 'public link PUT application/octet-stream 201' "an upload through the public link works while somebody is impersonated"
+check "$(command grep '^WebDAV PUT JSON file ' "$W/others-during")" 'WebDAV PUT JSON file 201' "... and so does the WebDAV upload of a JSON file (its content is not looked at)"
+check "$(command grep '^public link PUT JSON file ' "$W/others-during")" 'public link PUT JSON file 201' "... also through the public link"
+if diff "$W/others-without" "$W/others-during" > "$W/others-diff"; then
+	ok "all $(wc -l < "$W/others-without") requests of others got the same answer with and without the impersonation"
+else
+	bad "requests of others got another answer while somebody was impersonated: $(command grep '^[<>]' "$W/others-diff" | tr '\n' ' ')"
+fi
+check "$(whoami_ "$A")" bob "the impersonation was not affected by them"
+logout "$A" >/dev/null; check "$(whoami_ "$A")" admin "admin returned"
+check "$(active_records)" 0 "no impersonation is left"
 
 finish

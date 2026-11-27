@@ -66,9 +66,24 @@ class AuditTrail {
 	 * credential, so it may revoke one the account owner created meanwhile:
 	 * the owner is told (notification) and audit apps get an event.
 	 *
-	 * @param string $credential name of the app password, or "URL signing key"
+	 * @param string $name name of the app password or of the session (empty for the URL signing key)
+	 * @param string $kind Notifier::CREDENTIAL_*: what it is, so that the notification can say it in
+	 *                     the language of the owner
 	 */
-	public function credentialRevoked(string $targetUid, string $credential, ?string $impersonatorUid): void {
+	public function credentialRevoked(
+		string $targetUid,
+		string $name,
+		?string $impersonatorUid,
+		string $kind = Notifier::CREDENTIAL_APP_PASSWORD
+	): void {
+		// what the event calls the credential (as in version 1.0.1, consumers may rely on it)
+		if ($kind === Notifier::CREDENTIAL_SIGNING_KEY) {
+			$credential = 'URL signing key';
+		} elseif ($kind === Notifier::CREDENTIAL_SESSION) {
+			$credential = 'session ' . $name;
+		} else {
+			$credential = $name;
+		}
 		$this->dispatch(
 			self::EVENT_CREDENTIAL_REVOKED,
 			['targetUser' => $targetUid, 'credential' => $credential, 'impersonator' => $impersonatorUid]
@@ -79,7 +94,7 @@ class AuditTrail {
 				->setUser($targetUid)
 				->setDateTime(new \DateTime())
 				->setObject('credential', \substr(\sha1($targetUid . "\0" . $credential), 0, 32))
-				->setSubject(Notifier::SUBJECT_CREDENTIAL_REVOKED, [$credential]);
+				->setSubject(Notifier::SUBJECT_CREDENTIAL_REVOKED, [$name, $kind]);
 			$this->notificationManager->notify($notification);
 		} catch (\Throwable $e) {
 			$this->logger->logException($e, ['app' => 'impersonate']);

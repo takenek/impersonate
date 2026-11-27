@@ -42,8 +42,9 @@ const ok = (m) => { pass++; console.log('  PASS: ' + m); };
 const bad = (m) => { fail++; console.log('  FAIL: ' + m); };
 const check = (cond, m) => (cond ? ok(m) : bad(m));
 
-async function newSession(browser, label) {
-  const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+// locale: the language the browser asks for (it must not depend on the machine of the test)
+async function newSession(browser, label, locale = 'en-US') {
+  const context = await browser.newContext({ viewport: { width: 1400, height: 900 }, locale });
   const page = await context.newPage();
   const errors = [];
   // requests to the app: [method, path below /apps/impersonate/, body]
@@ -59,15 +60,22 @@ async function newSession(browser, label) {
 }
 
 const DIALOG = '.oc-dialog';
-// answer the confirmation dialog of the impersonate icon
-async function answerDialog(page, yes) {
+// answer the confirmation dialog of the impersonate icon (shot: a screenshot of the dialog before it is answered)
+async function answerDialog(page, yes, shot) {
   await page.waitForSelector(DIALOG, { state: 'visible', timeout: 5000 });
   const text = (await page.locator(`${DIALOG} .oc-dialog-content`).last().innerText()).trim();
+  if (shot) {
+    await page.screenshot({ path: shot });
+  }
   await page.locator(`${DIALOG} .oc-dialog-buttonrow button${yes ? '.primary' : ':not(.primary)'}`).last().click();
   return text;
 }
 
 const appConfig = (key) => occ(`config:app:get impersonate ${key}`).trim();
+// The language of a user's pages is the stored setting; without one ownCloud stores what the browser
+// asks for at the next login. The checks look at texts, so the language is set, and put back at the end.
+const getLang = (uid) => { try { return occ(`user:setting ${uid} core lang`).trim(); } catch (e) { return null; } };
+const setLang = (uid, lang) => occ(lang === null ? `user:setting ${uid} core lang --delete` : `user:setting ${uid} core lang --value=${lang}`);
 
 async function login(page, user, pw) {
   await page.goto(`${BASE}/index.php/login`);
@@ -108,7 +116,9 @@ async function usersPage(page) {
 (async () => {
   const browser = await chromium.launch(CHROME ? { executablePath: CHROME, headless: true } : { headless: true });
   const allErrors = [];
+  const adminLang = getLang('admin');
   try {
+    setLang('admin', 'en');
     console.log('== admin: users page');
     const a = await newSession(browser, 'admin');
     await login(a.page, 'admin', ADMIN_PW);
@@ -140,12 +150,29 @@ async function usersPage(page) {
 
     console.log('== the icon asks before it switches');
     await a.page.click('#userlist tr[data-test-uid="alice"] a.impersonate');
-    const question = await answerDialog(a.page, false);
+    const question = await answerDialog(a.page, false, path.join(SHOTS, '01b-confirmation.png'));
     check(/"alice"/.test(question), `the confirmation names the account ("${question}")`);
     await a.page.waitForTimeout(500);
     check(a.requests.length === 0, 'answering "No" sends no request');
     check(await currentUser(a.page) === 'admin', 'answering "No" changes nothing');
-    await a.page.screenshot({ path: path.join(SHOTS, '01b-confirmation.png') });
+
+    console.log('== the confirmation in a language whose translation is complete (Polish)');
+    // a dialog with a translated title and buttons around an English question is not a translation
+    setLang('admin', 'pl');
+    const p = await newSession(browser, 'admin-pl', 'pl-PL');
+    await login(p.page, 'admin', ADMIN_PW);
+    check(await p.page.evaluate(() => document.documentElement.lang.indexOf('pl') === 0), 'the pages of this session are Polish');
+    await usersPage(p.page);
+    await p.page.click('#userlist tr[data-test-uid="alice"] a.impersonate');
+    const polish = await answerDialog(p.page, false, path.join(SHOTS, '01c-confirmation-pl.png'));
+    check(/^Czy chcesz zalogować się jako użytkownik „alice”\?/.test(polish), `the question is asked in Polish and names the account ("${polish}")`);
+    check(!/Do you want|Everything you do|log out/.test(polish), 'no English text is left in it');
+    await p.page.waitForTimeout(500);
+    check(p.requests.length === 0 && await currentUser(p.page) === 'admin', 'answering "Nie" changes nothing');
+    allErrors.push(...p.errors);
+    await p.context.close();
+    setLang('admin', 'en');
+    await usersPage(a.page);
 
     console.log('== the account is the one the icon was created for, not the text of the row');
     // an account id that looks like a number, and a row whose visible text names somebody else
@@ -288,6 +315,7 @@ async function usersPage(page) {
       'impersonate:active --end']) {
       try { occ(args); } catch (e) { /* nothing to clean up */ }
     }
+    try { setLang('admin', adminLang); } catch (e) { /* it had none and has none */ }
   }
   console.log('== browser errors: ' + allErrors.length);
   allErrors.forEach((e) => console.log('  ' + e));

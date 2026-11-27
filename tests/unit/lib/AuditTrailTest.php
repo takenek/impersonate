@@ -107,10 +107,41 @@ class AuditTrailTest extends TestCase {
 			})
 		)->willReturnSelf();
 		$notification->expects($this->once())->method('setSubject')
-			->with(Notifier::SUBJECT_CREDENTIAL_REVOKED, ['Phone'])->willReturnSelf();
+			->with(Notifier::SUBJECT_CREDENTIAL_REVOKED, ['Phone', Notifier::CREDENTIAL_APP_PASSWORD])->willReturnSelf();
 		$this->notificationManager->method('createNotification')->willReturn($notification);
 		$this->notificationManager->expects($this->once())->method('notify')->with($notification);
 		$this->auditTrail->credentialRevoked('alice', 'Phone', 'admin');
+	}
+
+	public static function kindProvider(): array {
+		return [
+			// kind, name, what the event calls the credential (as version 1.0.1 did)
+			'app password' => [Notifier::CREDENTIAL_APP_PASSWORD, 'Phone', 'Phone'],
+			'session' => [Notifier::CREDENTIAL_SESSION, 'Firefox', 'session Firefox'],
+			'URL signing key' => [Notifier::CREDENTIAL_SIGNING_KEY, '', 'URL signing key'],
+		];
+	}
+
+	/**
+	 * The event keeps its English label for audit apps; the notification gets the name and the kind
+	 * separately, so that its text is a translation as a whole (Notifier).
+	 *
+	 * @dataProvider kindProvider
+	 */
+	public function testTheKindOfTheCredentialTravelsWithTheNotification(string $kind, string $name, string $label): void {
+		$this->expectEvent(
+			'user.impersonate.credentialrevoked',
+			['targetUser' => 'alice', 'credential' => $label, 'impersonator' => 'admin']
+		);
+		$notification = $this->createMock(INotification::class);
+		foreach (['setApp', 'setUser', 'setDateTime', 'setObject'] as $setter) {
+			$notification->method($setter)->willReturnSelf();
+		}
+		$notification->expects($this->once())->method('setSubject')
+			->with(Notifier::SUBJECT_CREDENTIAL_REVOKED, [$name, $kind])->willReturnSelf();
+		$this->notificationManager->method('createNotification')->willReturn($notification);
+		$this->notificationManager->expects($this->once())->method('notify')->with($notification);
+		$this->auditTrail->credentialRevoked('alice', $name, 'admin', $kind);
 	}
 
 	public function testANotificationThatCanNotBeSentIsOnlyLogged(): void {

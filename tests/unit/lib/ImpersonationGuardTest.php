@@ -76,13 +76,25 @@ class ImpersonationGuardTest extends TestCase {
 
 	protected function tearDown(): void {
 		$_SERVER = $this->serverBackup;
+		$_GET = [];
+		$_POST = [];
 		parent::tearDown();
 	}
 
 	protected function setUp(): void {
 		parent::setUp();
 		$this->serverBackup = $_SERVER;
-		unset($_SERVER['PHP_AUTH_PW'], $_SERVER['PHP_AUTH_USER'], $_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
+		unset(
+			$_SERVER['PHP_AUTH_PW'],
+			$_SERVER['PHP_AUTH_USER'],
+			$_SERVER['REDIRECT_HTTP_AUTHORIZATION'],
+			$_SERVER['CONTENT_TYPE'],
+			$_SERVER['HTTP_CONTENT_TYPE']
+		);
+		// the entry point of the request: the front controller unless a test says otherwise
+		$_SERVER['SCRIPT_FILENAME'] = '/var/www/owncloud/index.php';
+		$_GET = [];
+		$_POST = [];
 		$this->util = $this->createMock(Util::class);
 		$this->util->method('isBoundToItsToken')->willReturnCallback(function () {
 			return $this->bound;
@@ -413,6 +425,151 @@ class ImpersonationGuardTest extends TestCase {
 		$registry->method('all')->willReturn([]);
 		$guard = new ImpersonationGuard($this->util, $this->policy, $this->userSession, $this->userManager, $this->request, $this->logger, $registry, $this->cleanup, $this->reconciler);
 		$this->assertSame(ImpersonationGuard::PROCEED, $guard->check());
+	}
+
+	/**
+	 * The content type of a request can come from three places: $_SERVER['CONTENT_TYPE'],
+	 * $_SERVER['HTTP_CONTENT_TYPE'] (the name some web servers use) and the platform's view of the header.
+	 */
+	private function contentType(?string $contentType, ?string $httpContentType, ?string $platformHeader): void {
+		if ($contentType !== null) {
+			$_SERVER['CONTENT_TYPE'] = $contentType;
+		}
+		if ($httpContentType !== null) {
+			$_SERVER['HTTP_CONTENT_TYPE'] = $httpContentType;
+		}
+		$this->request->method('getHeader')->willReturnCallback(function ($name) use ($platformHeader) {
+			return $name === 'Content-Type' ? $platformHeader : null;
+		});
+	}
+
+	public static function rawPutBodyProvider(): array {
+		return [
+			'a file' => ['application/octet-stream', null, null],
+			'a text file' => ['text/plain; charset=utf-8', null, null],
+			'a WebDAV document' => ['text/xml', null, null],
+			'no content type at all' => [null, null, null],
+			'an empty content type' => ['', null, null],
+			'the same type under every name' => ['image/png', 'image/png', 'image/png'],
+		];
+	}
+
+	/**
+	 * The check runs for the requests of everybody while somebody impersonates somebody else. The
+	 * platform hands the body of such a PUT request out once: if the guard asked for the parameters,
+	 * an upload through a public link was refused and other requests were handled differently.
+	 *
+	 * @dataProvider rawPutBodyProvider
+	 */
+	public function testThePlatformIsNotAskedForTheParametersOfAPutRequestWhoseBodyHoldsNone(?string $contentType, ?string $httpContentType, ?string $platformHeader): void {
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn([]);
+		$this->contentType($contentType, $httpContentType, $platformHeader);
+		$this->request('PUT', '/apps/files/upload');
+		$this->request->expects($this->never())->method('getParams');
+		$this->reconciler->expects($this->never())->method('end');
+		$this->logger->expects($this->never())->method('logException');
+		$this->assertSame(ImpersonationGuard::PROCEED, $this->guard->check());
+	}
+
+	public function testTheQueryOfSuchAPutRequestIsStillExamined(): void {
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn([]);
+		$_SERVER['CONTENT_TYPE'] = 'application/octet-stream';
+		$_GET = ['dir' => '/', 'token' => self::sessionId('impersonated')];
+		$this->request('PUT', '/apps/files/upload');
+		$this->request->expects($this->never())->method('getParams');
+		$this->reconciler->expects($this->once())->method('end')->with('r1', self::RECORD, Reconciler::REASON_TOKEN_MISUSE);
+		$this->assertSame(ImpersonationGuard::TOKEN_MISUSE, $this->guard->check());
+	}
+
+	public static function parameterBodyProvider(): array {
+		return [
+			'PUT with a JSON body' => ['PUT', 'application/json', null, null],
+			'PUT with a JSON body and a charset' => ['PUT', 'application/json; charset=utf-8', null, null],
+			'PUT, the type in another letter case' => ['PUT', 'Application/JSON', null, null],
+			'PUT with a form encoded body' => ['PUT', 'application/x-www-form-urlencoded', null, null],
+			// one place that names JSON or a form is enough: the body is only left alone if none does
+			'PUT, the type only under the name some web servers use' => ['PUT', null, 'application/json', null],
+			'PUT, an empty type and the real one under the other name' => ['PUT', '', 'application/json', null],
+			'PUT, two names that disagree' => ['PUT', 'text/plain', 'application/x-www-form-urlencoded', null],
+			'PUT, only the platform knows the type' => ['PUT', null, null, 'application/json'],
+			'PUT, the platform disagrees with the web server' => ['PUT', 'application/octet-stream', null, 'application/json; charset=utf-8'],
+			// only PUT bodies are handed out as a stream: everything else is as it was
+			'POST with a JSON body (the login form takes one)' => ['POST', 'application/json', null, null],
+			'POST with any other body' => ['POST', 'application/octet-stream', null, null],
+			'PATCH with any other body' => ['PATCH', 'text/plain', null, null],
+			'DELETE without a body' => ['DELETE', null, null, null],
+		];
+	}
+
+	/**
+	 * @dataProvider parameterBodyProvider
+	 */
+	public function testABodyThatHoldsParametersIsExamined(string $method, ?string $contentType, ?string $httpContentType, ?string $platformHeader): void {
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn([]);
+		$this->contentType($contentType, $httpContentType, $platformHeader);
+		$this->params = ['user' => 'alice', 'password' => self::sessionId('impersonated')];
+		$this->request($method, '/login');
+		$this->reconciler->expects($this->once())->method('end')->with('r1', self::RECORD, Reconciler::REASON_TOKEN_MISUSE);
+		$this->assertSame(ImpersonationGuard::TOKEN_MISUSE, $this->guard->check());
+	}
+
+	public static function webDavEntryPointProvider(): array {
+		return [
+			'WebDAV' => ['/var/www/owncloud/remote.php', 'PUT', 'application/json'],
+			'WebDAV of public links' => ['/var/www/owncloud/public.php', 'PUT', 'application/json'],
+			'a WebDAV document' => ['/var/www/owncloud/remote.php', 'PROPFIND', 'application/xml'],
+			'a form encoded body' => ['/var/www/owncloud/remote.php', 'POST', 'application/x-www-form-urlencoded'],
+			'on a file system that ignores the letter case' => ['C:\\inetpub\\owncloud/Remote.PHP', 'PUT', 'application/json'],
+		];
+	}
+
+	/**
+	 * The body of a WebDAV request is a file or a WebDAV document of any size: decoding a large
+	 * JSON file took more memory than the request may use, for every user of the instance.
+	 *
+	 * @dataProvider webDavEntryPointProvider
+	 */
+	public function testTheBodyOfAWebDavRequestIsNotDecoded(string $script, string $method, string $contentType): void {
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn(['own-session-id']);
+		$_SERVER['SCRIPT_FILENAME'] = $script;
+		$_SERVER['CONTENT_TYPE'] = $contentType;
+		// what the body would decode to
+		$this->params = ['password' => self::sessionId('impersonated')];
+		$this->request($method, '/webdav/report.json');
+		$this->request->expects($this->never())->method('getParams');
+		$this->reconciler->expects($this->never())->method('end');
+		$this->assertSame(ImpersonationGuard::PROCEED, $this->guard->check());
+	}
+
+	public static function webDavCredentialProvider(): array {
+		return [
+			'the password of HTTP Basic authentication' => ['Basic ' . \base64_encode('alice:the-impersonated-session-id'), [], [], []],
+			'a token' => ['Bearer the-impersonated-session-id', [], [], []],
+			'the session of the request' => [null, ['the-impersonated-session-id'], [], []],
+			'a parameter of the query' => [null, [], ['access_token' => self::sessionId('impersonated')], []],
+			'a parameter of a form' => [null, [], [], ['login' => ['password' => self::sessionId('impersonated')]]],
+		];
+	}
+
+	/**
+	 * @dataProvider webDavCredentialProvider
+	 */
+	public function testWhereAWebDavRequestCarriesCredentialsIsStillExamined(?string $header, array $sessionSecrets, array $query, array $form): void {
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn($sessionSecrets);
+		$_SERVER['SCRIPT_FILENAME'] = '/var/www/owncloud/remote.php';
+		$_SERVER['CONTENT_TYPE'] = 'application/octet-stream';
+		$_GET = $query;
+		$_POST = $form;
+		$this->request->method('getHeader')->with('Authorization')->willReturn($header);
+		$this->request('PUT', '/webdav/file.bin');
+		$this->request->expects($this->never())->method('getParams');
+		$this->reconciler->expects($this->once())->method('end')->with('r1', self::RECORD, Reconciler::REASON_TOKEN_MISUSE);
+		$this->assertSame(ImpersonationGuard::TOKEN_MISUSE, $this->guard->check());
 	}
 
 	public function testATokenWhoseRevocationIsStillPendingIsRefusedAsWell(): void {

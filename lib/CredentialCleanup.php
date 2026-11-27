@@ -159,7 +159,7 @@ class CredentialCleanup {
 						'Removed the URL signing key of user "{target}" created while "{impersonator}" impersonated them',
 						['app' => 'impersonate', 'target' => $target->getUID(), 'impersonator' => $impersonatorUid]
 					);
-					$this->auditTrail->credentialRevoked($target->getUID(), 'URL signing key', $impersonatorUid);
+					$this->auditTrail->credentialRevoked($target->getUID(), '', $impersonatorUid, Notifier::CREDENTIAL_SIGNING_KEY);
 				}
 			} catch (\Throwable $e) {
 				$this->logger->logException($e, ['app' => 'impersonate']);
@@ -188,8 +188,9 @@ class CredentialCleanup {
 		);
 		$this->auditTrail->credentialRevoked(
 			$target->getUID(),
-			$isAppPassword ? $name : 'session ' . $name,
-			$impersonatorUid
+			$name,
+			$impersonatorUid,
+			$isAppPassword ? Notifier::CREDENTIAL_APP_PASSWORD : Notifier::CREDENTIAL_SESSION
 		);
 	}
 

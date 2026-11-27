@@ -251,6 +251,9 @@ jobs:
           npm ci --prefix tests/ui --no-audit --no-fund
           (cd tests/ui && npx --no-install playwright-core install --with-deps chromium)
           SHOTS="$RUNNER_TEMP/screenshots" node tests/ui/ui-impersonate.js
+      # last: it enables server side encryption on the instance and leaves it enabled
+      - name: Impersonation with server side encryption (master key)
+        run: tests/e2e/encryption.sh
       - name: ownCloud log on failure
         if: failure()
         run: |

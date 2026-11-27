@@ -29,6 +29,11 @@ use OCP\Notification\INotifier;
 class Notifier implements INotifier {
 	public const SUBJECT_CREDENTIAL_REVOKED = 'credential_revoked';
 
+	/** what was revoked: the second subject parameter (the first one is its name) */
+	public const CREDENTIAL_APP_PASSWORD = 'app_password';
+	public const CREDENTIAL_SESSION = 'session';
+	public const CREDENTIAL_SIGNING_KEY = 'signing_key';
+
 	/** @var IFactory */
 	private $l10nFactory;
 	/** @var IURLGenerator */
@@ -50,14 +55,28 @@ class Notifier implements INotifier {
 			throw new \InvalidArgumentException('Unknown notification');
 		}
 		$parameters = $notification->getSubjectParameters();
-		$credential = isset($parameters[0]) ? (string)$parameters[0] : '';
+		$name = isset($parameters[0]) ? (string)$parameters[0] : '';
+		// A notification that version 1.0.1 stored has no kind: its first parameter is the whole
+		// label ("session <name>", "URL signing key") and gets the general text.
+		$kind = isset($parameters[1]) ? (string)$parameters[1] : self::CREDENTIAL_APP_PASSWORD;
 		$l = $this->l10nFactory->get('impersonate', $languageCode);
-		$notification->setParsedSubject(
-			(string)$l->t(
+		// every text is a whole sentence of its own, so that nothing untranslated is put into a translation
+		if ($kind === self::CREDENTIAL_SIGNING_KEY) {
+			$subject = $l->t(
+				'The URL signing key of your account was removed for security reasons at the end of an impersonation of your account. A new key is created when one is needed.'
+			);
+		} elseif ($kind === self::CREDENTIAL_SESSION) {
+			$subject = $l->t(
+				'The session "%s" of your account was ended for security reasons at the end of an impersonation of your account. If it was your own session, please log in again.',
+				[$name]
+			);
+		} else {
+			$subject = $l->t(
 				'"%s" was revoked for security reasons at the end of an impersonation of your account. If you created it yourself, please create it again.',
-				[$credential]
-			)
-		);
+				[$name]
+			);
+		}
+		$notification->setParsedSubject((string)$subject);
 		// where the user finds the sessions and app passwords of the account
 		$notification->setLink(
 			$this->urlGenerator->getAbsoluteURL('/index.php/settings/personal?sectionid=security')

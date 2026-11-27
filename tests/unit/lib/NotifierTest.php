@@ -66,6 +66,36 @@ class NotifierTest extends TestCase {
 		$this->assertSame($notification, $this->notifier->prepare($notification, 'de'));
 	}
 
+	public static function kindProvider(): array {
+		return [
+			'app password' => [['Phone', Notifier::CREDENTIAL_APP_PASSWORD], '"Phone" was revoked', null],
+			// nothing untranslated is put into the sentence: no "session ..." label, no "URL signing key" label
+			'session' => [['Firefox', Notifier::CREDENTIAL_SESSION], 'The session "Firefox" of your account was ended', '"session'],
+			'URL signing key' => [['', Notifier::CREDENTIAL_SIGNING_KEY], 'The URL signing key of your account was removed', '""'],
+			'unknown kind' => [['Phone', 'something new'], '"Phone" was revoked', null],
+			// as version 1.0.1 stored them: one parameter, the whole label
+			'stored by 1.0.1: session' => [['session Firefox'], '"session Firefox" was revoked', null],
+			'stored by 1.0.1: URL signing key' => [['URL signing key'], '"URL signing key" was revoked', null],
+		];
+	}
+
+	/**
+	 * @dataProvider kindProvider
+	 */
+	public function testEveryKindOfCredentialHasASentenceOfItsOwn(array $parameters, string $expected, ?string $notExpected): void {
+		$notification = $this->notification('impersonate', Notifier::SUBJECT_CREDENTIAL_REVOKED, $parameters);
+		$notification->expects($this->once())->method('setParsedSubject')->with(
+			$this->callback(function ($subject) use ($expected, $notExpected) {
+				return \is_string($subject)
+					&& \strpos($subject, $expected) === 0
+					&& \strpos($subject, 'impersonation of your account') !== false
+					&& ($notExpected === null || \strpos($subject, $notExpected) === false);
+			})
+		)->willReturnSelf();
+		$notification->expects($this->once())->method('setLink')->willReturnSelf();
+		$this->notifier->prepare($notification, 'de');
+	}
+
 	public function testPrepareWithoutParameters(): void {
 		$notification = $this->notification('impersonate', Notifier::SUBJECT_CREDENTIAL_REVOKED, []);
 		$notification->expects($this->once())->method('setParsedSubject')->with($this->stringContains('"" was revoked'))->willReturnSelf();

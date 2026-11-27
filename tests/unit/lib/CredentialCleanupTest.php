@@ -23,6 +23,7 @@ use OC\Authentication\Token\DefaultTokenProvider;
 use OC\Authentication\Token\IToken;
 use OCA\Impersonate\AuditTrail;
 use OCA\Impersonate\CredentialCleanup;
+use OCA\Impersonate\Notifier;
 use OCP\IConfig;
 use OCP\ILogger;
 use OCP\IUser;
@@ -115,9 +116,10 @@ class CredentialCleanupTest extends TestCase {
 		// e.g. a login that used the session id of the impersonation as its password
 		$this->token(55, IToken::TEMPORARY_TOKEN, false, 'derived');
 		$this->auditTrail->expects($this->exactly(3))->method('credentialRevoked')->withConsecutive(
-			['alice', 'minted', 'admin'],
-			['alice', 'minted too', 'admin'],
-			['alice', 'session derived', 'admin']
+			['alice', 'minted', 'admin', Notifier::CREDENTIAL_APP_PASSWORD],
+			['alice', 'minted too', 'admin', Notifier::CREDENTIAL_APP_PASSWORD],
+			// what it is travels separately from its name: the notification says it in the owner's language
+			['alice', 'derived', 'admin', Notifier::CREDENTIAL_SESSION]
 		);
 		$this->logger->expects($this->exactly(3))->method('warning')->withConsecutive(
 			[$this->stringContains('app password')],
@@ -182,7 +184,8 @@ class CredentialCleanupTest extends TestCase {
 
 	public function testASigningKeyThatAppearedIsRemoved(): void {
 		$this->signingKey = 'created-while-impersonating';
-		$this->auditTrail->expects($this->once())->method('credentialRevoked')->with('alice', 'URL signing key', 'admin');
+		$this->auditTrail->expects($this->once())->method('credentialRevoked')
+			->with('alice', '', 'admin', Notifier::CREDENTIAL_SIGNING_KEY);
 		$this->assertSame(self::DONE, self::done($this->cleanup->run($this->alice, 0, false, 'admin')));
 		$this->assertSame('', $this->signingKey);
 	}
@@ -255,11 +258,11 @@ class CredentialCleanupTest extends TestCase {
 		$this->onRevoke = function ($id) use (&$sequence) {
 			$sequence[] = "revoke $id";
 		};
-		$this->auditTrail->method('credentialRevoked')->willReturnCallback(function ($uid, $name) use (&$sequence) {
-			$sequence[] = "announce $name";
+		$this->auditTrail->method('credentialRevoked')->willReturnCallback(function ($uid, $name, $impersonator, $kind) use (&$sequence) {
+			$sequence[] = "announce $kind $name";
 		});
 		$this->cleanup->run($this->alice, 50, true, 'admin');
-		$this->assertSame(['revoke 51', 'revoke 52', 'announce session derived', 'announce minted'], $sequence);
+		$this->assertSame(['revoke 51', 'revoke 52', 'announce session derived', 'announce app_password minted'], $sequence);
 	}
 
 	public function testAFailingSigningKeyRemovalIsReported(): void {

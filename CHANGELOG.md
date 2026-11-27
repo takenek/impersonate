@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-27
+
+Bug fix release. It fixes a defect of 1.0.1 that the verification of its fixes found, completes the
+Polish translation and adds tests. Compared with 1.0.1 nothing changes in the configuration or in
+the behaviour of an impersonation.
+
+Upgrade from 1.0.1: replace the app folder (owned by `root`, see README section 2) and run
+`occ upgrade`. From 1.0.0 or 0.x read the upgrade notes of 1.0.1 first (section 1.0.1 of
+CHANGELOG.md, <https://github.com/takenek/impersonate/releases/tag/v1.0.1>): that release changed
+behaviour.
+
+### Fixed
+- While somebody was impersonated, requests of everybody else were handled differently (1.0.1 only):
+  an upload through a public link (WebDAV `PUT`) was refused with HTTP 503, the upload of a large
+  JSON file through WebDAV could end with an out-of-memory error (HTTP 500), and a `PUT` request
+  with another body to the OCS API was not answered as usual. The check that the session of an
+  impersonation is not used as a credential asked ownCloud for the parameters of every request; it
+  no longer does so for the body of a WebDAV request (`remote.php`, `public.php`) and for a `PUT`
+  body whose content type names neither JSON nor a form. Of such requests the session, the
+  `Authorization` header, the query and a form that PHP itself has parsed (a `POST` form) are
+  examined as before. Found by the verification of the fixes of 1.0.1.
+- The Polish translation is complete: 18 of 25 texts were shown in English, among them the
+  confirmation before an impersonation starts, the error messages of a refused impersonation and
+  most of the admin page. A unit test compares the texts in the code with the translation.
+- The notification about a revoked credential is a sentence of its own for an app password, a
+  session and the URL signing key, so that a translation covers the whole text (translated to
+  Polish; the other languages show the English sentence). Before, an English label ("session …",
+  "URL signing key") was put into the translated sentence. The event
+  `user.impersonate.credentialrevoked` is unchanged.
+
+### Changed
+- Tests: the end-to-end checks send the blocked operations also without the front controller in the
+  URL (as a web server with URL rewriting hands them to ownCloud) and compare the answers to
+  requests of other users with and without an active impersonation; the browser test checks the
+  confirmation in Polish and sets the language of its sessions; a new end-to-end check runs an
+  impersonation with server-side encryption (master key) and compares the encryption state of the
+  session before and after (finding IMP-08 of the security review).
+
 ## [1.0.1] - 2026-11-27
 
 Security release. It fixes the findings of a full source review of the plugin (README section 7,
@@ -329,7 +367,8 @@ owncloud-impersonate (0.0.2)
 owncloud-impersonate (0.0.1)
 * First release
 
-[Unreleased]: https://github.com/takenek/impersonate/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/takenek/impersonate/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/takenek/impersonate/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/takenek/impersonate/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/takenek/impersonate/releases/tag/v1.0.0
 [0.7.0]: https://github.com/owncloud/impersonate/compare/v0.6.1...8b137cc

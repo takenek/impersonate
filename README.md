@@ -1,7 +1,7 @@
 # Impersonate (`impersonate`) – log in as another user on ownCloud 11
 
 [![CI](https://github.com/takenek/impersonate/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/impersonate/actions/workflows/ci.yml)
-[![Release](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/release-v1.0.1.svg)](https://github.com/takenek/impersonate/releases/latest)
+[![Release](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/release-v1.0.2.svg)](https://github.com/takenek/impersonate/releases/latest)
 [![License](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/license.svg)](LICENSE)
 
 Impersonate lets ownCloud administrators – and, if allowed, group admins – log in as another user
@@ -34,14 +34,14 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
 
 ## 2. Installation
 
-1. Download `impersonate-1.0.1.tar.gz` and `impersonate-1.0.1.tar.gz.sha256` from the
+1. Download `impersonate-1.0.2.tar.gz` and `impersonate-1.0.2.tar.gz.sha256` from the
    [latest release](https://github.com/takenek/impersonate/releases/latest) and verify the archive:
 
    ```bash
-   sha256sum -c impersonate-1.0.1.tar.gz.sha256
+   sha256sum -c impersonate-1.0.2.tar.gz.sha256
    ```
 
-   The release archive is built by CI from the signed tag `v1.0.1` (see [SECURITY.md](SECURITY.md),
+   The release archive is built by CI from the signed tag `v1.0.2` (see [SECURITY.md](SECURITY.md),
    "Verifying a release"; the archive contains the SECURITY.md of its version).
 
 2. Extract it into an app directory of your ownCloud (the archive contains the folder
@@ -51,7 +51,7 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
    server's group may only read them. Replace `www-data` by the group of your web server:
 
    ```bash
-   sudo tar -xzf impersonate-1.0.1.tar.gz -C /var/www/owncloud/apps-external
+   sudo tar -xzf impersonate-1.0.2.tar.gz -C /var/www/owncloud/apps-external
    sudo chown -R root:www-data /var/www/owncloud/apps-external/impersonate
    sudo chmod -R u=rwX,g=rX,o= /var/www/owncloud/apps-external/impersonate
    ```
@@ -74,7 +74,7 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
    verified archive:
 
    ```bash
-   mkdir /tmp/impersonate-check && tar -xzf impersonate-1.0.1.tar.gz -C /tmp/impersonate-check
+   mkdir /tmp/impersonate-check && tar -xzf impersonate-1.0.2.tar.gz -C /tmp/impersonate-check
    sudo diff -r /tmp/impersonate-check/impersonate /var/www/owncloud/apps-external/impersonate && echo unchanged
    ```
 
@@ -94,7 +94,7 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
 6. Make sure the background jobs of ownCloud run (system cron is recommended: `occ background:cron`).
    The app uses one to finish impersonations whose session was lost (section 4).
 
-### Upgrade (from 1.0.0 or from the ownCloud app 0.x)
+### Upgrade (from 1.0.x or from the ownCloud app 0.x)
 
 Disable nothing: replace the folder `impersonate` by the one from the archive (remove the old folder
 first, set the owner as in step 2), then run `sudo -u www-data php occ upgrade`. The settings are
@@ -165,7 +165,8 @@ what outlives an impersonation and records it:
   outside that session is refused and ends the impersonation, and every end revokes the session
   token;
 * every start, every end and every refusal is logged (warning level, uids, for requests the remote
-  address); the events `user.afterimpersonate` and `user.afterimpersonatelogout` (with the reason)
+  address; only the refusal of a request that is not examined, SECURITY.md point 8, at info level);
+  the events `user.afterimpersonate` and `user.afterimpersonatelogout` (with the reason)
   are dispatched. An impersonation whose session just expires is ended and reported by a background
   job;
 * the impersonated user sees the session as "Impersonated by &lt;uid&gt;" in Personal → Security and
@@ -214,12 +215,13 @@ BASE=http://localhost:8080 tests/e2e/e2e.sh             # HTTP end-to-end
 BASE=http://localhost:8080 tests/e2e/security-checks.sh # security properties
 npm ci --prefix tests/ui && (cd tests/ui && npx playwright-core install chromium)
 BASE=http://localhost:8080 node tests/ui/ui-impersonate.js   # headless browser
+BASE=http://localhost:8080 tests/e2e/encryption.sh      # last: enables server-side encryption
 ```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs PHPUnit, PHPStan, Phan, PHP-CS-Fixer,
-a gitleaks secret scan, the HTTP end-to-end and security checks, the Behat API acceptance tests and a
-headless browser test against ownCloud 11.1.0 on PHP 8.3, and builds and publishes the release
-archive for signed tags.
+a gitleaks secret scan, the HTTP end-to-end and security checks, the Behat API acceptance tests, a
+headless browser test and a check with server-side encryption against ownCloud 11.1.0 on PHP 8.3,
+and builds and publishes the release archive for signed tags.
 
 ## 6. Known limitations
 
@@ -231,21 +233,26 @@ archive for signed tags.
 * If the app is disabled while a session impersonates somebody, that session keeps the impersonated
   identity until it is logged out (the logout is then a normal logout). Run
   `occ impersonate:active --end` before you disable the app.
-* With per-user encryption keys (not master key) the files of the impersonated user cannot be
-  decrypted while impersonating, and the impersonator's key stays in the session during the
-  impersonation. The app is tested with encryption disabled; test it in your encryption mode first.
+* Server-side encryption: the app is tested without encryption and with master-key encryption, which
+  is what `occ encryption:enable` sets up on ownCloud 11.1. Per-user keys, which an instance that was
+  upgraded from an older version may still use, are not tested: there the files of the impersonated
+  user cannot be decrypted while impersonating, and the impersonator's key stays in the session
+  during the impersonation. Test it in your encryption mode first.
 * Group ids that contain the character `|` cannot be selected or removed in the admin page (the
   group picker of ownCloud uses it as a separator). The page shows them and keeps them in the list;
   change them with `occ config:app:set impersonate impersonate_include_groups_list`.
 * While an impersonation is active, every request to the instance costs one or two additional token
   lookups (the check that the session token of the impersonation is not used elsewhere).
-* The translations of the texts that are new in 1.0.1 are not available yet: they are shown in English.
+* The Polish translation is complete. In the other languages the texts that came with 1.0.0, 1.0.1
+  and 1.0.2 (among them the confirmation before an impersonation starts and the notifications about
+  revoked credentials) are not translated yet: they are shown in English.
 
 ## 7. Security review
 
 The code was reviewed with Anthropic's Mythos 5.2 on 2026-11-27 (full source review of the plugin,
 advisory check of its dependencies, remediation of every accepted finding that can be fixed within
-the plugin in release 1.0.1; see [CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md)). The
+the plugin in release 1.0.1, a verification of these fixes that led to release 1.0.2; see
+[CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md)). The
 review covered the code of this plugin only: ownCloud itself, other apps and the configuration of
 your instance were not part of it. An automated review is not a certification: report anything it
 missed as described in SECURITY.md.
