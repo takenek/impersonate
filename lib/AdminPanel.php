@@ -2,8 +2,8 @@
 /**
  * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
  * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
- * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
- * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * Modified on 2026-11-26 and 2026-11-27 by Marek Królikowski (TaKeN): ownCloud 11.1 support and
+ * security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
  * See LICENSE and COPYRIGHT.
  *
  * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
@@ -51,6 +51,10 @@ class AdminPanel implements ISettings {
 		$t->assign('includeGroups', $this->policy->isIncludeGroupsMode());
 		$t->assign('includedGroups', $this->policy->getIncludedGroups());
 		$t->assign('groupAdminFeatureEnabled', $this->policy->isGroupAdminFeatureEnabled());
+		$t->assign('allowGroupAdminTargets', $this->policy->allowsGroupAdminTargets());
+		$t->assign('maxDurationMinutes', \intdiv($this->policy->getMaxDuration(), 60));
+		$t->assign('forbiddenPrefixes', $this->policy->getExtraForbiddenPrefixes());
+		$t->assign('ignoredForbiddenPrefixes', $this->policy->getIgnoredForbiddenPrefixes());
 		return $t;
 	}
 

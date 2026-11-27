@@ -1,0 +1,12 @@
+{
+ "name": "impersonate-ui-tests",
+ "description": "Headless browser test of Impersonate for ownCloud 11 (not part of the app)",
+ "license": "AGPL-3.0-or-later",
+ "private": true,
+ "devDependencies": {
+  "playwright-core": "1.58.2"
+ },
+ "engines": {
+  "node": ">= 18"
+ }
+}

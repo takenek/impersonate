@@ -2,8 +2,8 @@
 /**
  * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
  * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
- * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
- * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * Modified on 2026-11-26 and 2026-11-27 by Marek Królikowski (TaKeN): ownCloud 11.1 support and
+ * security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
  * See LICENSE and COPYRIGHT.
  *
  * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
@@ -33,6 +33,8 @@ use Behat\Behat\Context\Context;
 use Behat\Behat\Hook\Scope\AfterScenarioScope;
 use Behat\Behat\Hook\Scope\BeforeScenarioScope;
 use Behat\Gherkin\Node\TableNode;
+use GuzzleHttp\Client;
+use GuzzleHttp\Cookie\CookieJar;
 use TestHelpers\SetupHelper;
 use TestHelpers\HttpRequestHelper;
 
@@ -63,11 +65,15 @@ class ImpersonateAppContext implements Context {
 	 * @throws Exception
 	 */
 	public function getOccCommandsForImpersonateOption(string $option, ?string $value = ""): array {
-		// mirror what js/settings-admin.js stores for each radio button
+		// what the admin panel stores for each radio button (PUT /apps/impersonate/policy)
 		$set = static function (string $key, string $val): string {
 			return "config:app:set impersonate $key --value $val";
 		};
 		switch ($option) {
+			case "allow group admins as targets":
+				return [
+					$set('impersonate_allow_groupadmin_targets', $value === 'true' ? 'true' : 'false'),
+				];
 			case "allow only an admin":
 				return [
 					$set('impersonate_all_groupadmins', 'false'),
@@ -195,18 +201,80 @@ class ImpersonateAppContext implements Context {
 	}
 
 	/**
+	 * The CSRF token of the session as the pages of ownCloud carry it
+	 *
+	 * @param string $html
+	 *
+	 * @return string
+	 * @throws Exception
+	 */
+	private static function requestToken(string $html): string {
+		if (\preg_match('/data-requesttoken="([^"]*)"/', $html, $matches) !== 1) {
+			throw new Exception("the page has no request token");
+		}
+		return \html_entity_decode($matches[1], ENT_QUOTES);
+	}
+
+	/**
+	 * An impersonation can only be started from an interactive session (not by
+	 * a request that is authenticated with HTTP Basic credentials): log in
+	 * through the login form like a browser and send the CSRF token.
+	 *
 	 * @When /^"([^"]*)" sends a request to impersonate user "([^"]*)"$/
 	 *
 	 * @param string $requester
 	 * @param string $impersonateUser
 	 * @return void
-	 * @throws JsonException|\GuzzleHttp\Exception\GuzzleException
+	 * @throws Exception|\GuzzleHttp\Exception\GuzzleException
 	 */
 	public function sendRequestToImpersonateUser(string $requester, string $impersonateUser): void {
 		$requestData = [
 				"target" => $this->featureContext->getActualUsername($impersonateUser)
 			];
 
+		if ($requester === "admin") {
+			$userName =  $this->featureContext->getAdminUsername();
+			$password = $this->featureContext->getAdminPassword();
+		} else {
+			$userName = $this->featureContext->getActualUsername($requester);
+			$password = $this->featureContext->getActualPassword($requester);
+		}
+		$baseUrl = $this->featureContext->getBaseUrl();
+		// one browser-like client per request: its own session cookies, HTTP error codes are answers
+		$client = new Client(['cookies' => new CookieJar(), 'http_errors' => false]);
+		$loginPage = $client->get($baseUrl . '/index.php/login');
+		$client->post(
+			$baseUrl . '/index.php/login',
+			[
+				'form_params' => [
+					'user' => $userName,
+					'password' => $password,
+					'requesttoken' => self::requestToken((string)$loginPage->getBody()),
+					'timezone' => 'UTC',
+					'timezone-offset' => '0',
+				],
+			]
+		);
+		$page = $client->get($baseUrl . '/index.php/apps/files/');
+		$response = $client->post(
+			$baseUrl . $this->getImpersonateUrl(),
+			[
+				'headers' => ['requesttoken' => self::requestToken((string)$page->getBody())],
+				'form_params' => $requestData,
+			]
+		);
+		$this->featureContext->setResponse($response);
+	}
+
+	/**
+	 * @When /^"([^"]*)" sends a request with HTTP Basic credentials to impersonate user "([^"]*)"$/
+	 *
+	 * @param string $requester
+	 * @param string $impersonateUser
+	 * @return void
+	 * @throws JsonException|\GuzzleHttp\Exception\GuzzleException
+	 */
+	public function sendBasicAuthRequestToImpersonateUser(string $requester, string $impersonateUser): void {
 		if ($requester === "admin") {
 			$userName =  $this->featureContext->getAdminUsername();
 			$password = $this->featureContext->getAdminPassword();
@@ -221,7 +289,7 @@ class ImpersonateAppContext implements Context {
 			$userName,
 			$password,
 			null,
-			$requestData
+			["target" => $this->featureContext->getActualUsername($impersonateUser)]
 		);
 		$this->featureContext->setResponse($response);
 	}
@@ -239,6 +307,8 @@ class ImpersonateAppContext implements Context {
 			$this->featureContext->runOccWithEnvVariables(['config:system:delete allow_subadmins']);
 			$this->subadminFeatureChanged = false;
 		}
+		// the scenarios do not log out: end the impersonations they started
+		$this->featureContext->runOccWithEnvVariables(['impersonate:active --end']);
 	}
 
 	/**

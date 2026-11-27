@@ -7,9 +7,10 @@ HANDLEBARS=$(CURDIR)/node_modules/handlebars/bin/handlebars
 appname=$(shell sed -n 's:.*<id>\(.*\)</id>.*:\1:p' appinfo/info.xml)
 appversion=$(shell sed -n 's:.*<version>\(.*\)</version>.*:\1:p' appinfo/info.xml)
 archive=build/$(appname)-$(appversion).tar.gz
-# reproducible archives: fixed order, owner and (with SOURCE_DATE_EPOCH) timestamps
+# reproducible archives: fixed order, owner, file modes (whatever the umask of the builder is) and
+# (with SOURCE_DATE_EPOCH) timestamps
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null)
-TAR_REPRO=--sort=name --owner=0 --group=0 --numeric-owner $(if $(SOURCE_DATE_EPOCH),--mtime=@$(SOURCE_DATE_EPOCH))
+TAR_REPRO=--sort=name --owner=0 --group=0 --numeric-owner --mode='u=rwX,go=rX' $(if $(SOURCE_DATE_EPOCH),--mtime=@$(SOURCE_DATE_EPOCH))
 
 
 # composer
@@ -90,7 +91,7 @@ clean: clean-build clean-deps
 .PHONY: clean-deps
 clean-deps:
 	rm -Rf vendor
-	rm -Rf vendor-bin/**/vendor vendor-bin/**/composer.lock
+	rm -Rf vendor-bin/**/vendor
 
 .PHONY: clean-templates
 clean-templates:
@@ -113,6 +114,7 @@ build-src: ## Build source package
 		l10n \
 		lib \
 		README.md \
+		SECURITY.md \
 		LICENSE \
 		COPYRIGHT \
 		AUTHORS.md \

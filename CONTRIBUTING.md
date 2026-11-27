@@ -9,6 +9,8 @@ Thank you for your interest in Impersonate for ownCloud 11.
 * **Pull requests:** keep them focused, add or adjust tests (`tests/unit`, `tests/e2e`,
   `tests/acceptance`) and make sure CI passes (see README section 5 for running the tests locally).
   Code style: `make test-php-style-fix`; static analysis: `make test-php-phpstan test-php-phan`.
+  The tools are installed from lockfiles (`vendor-bin/*/composer.lock`, `tests/ui/package-lock.json`):
+  commit the lockfile together with a change of its manifest.
 
 By contributing you agree that your contribution is licensed under the GNU Affero General Public
 License version 3 or later (see [LICENSE](LICENSE) and [COPYRIGHT](COPYRIGHT)), and you may add an

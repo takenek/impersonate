@@ -2,8 +2,8 @@
 /**
  * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
  * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
- * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
- * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * Modified on 2026-11-26 and 2026-11-27 by Marek Królikowski (TaKeN): ownCloud 11.1 support and
+ * security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
  * See LICENSE and COPYRIGHT.
  *
  * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
@@ -15,6 +15,17 @@ script('impersonate', 'settings-admin');
 style('impersonate', 'settings-admin');
 $groupAdminsDisabled = !$_['groupAdminFeatureEnabled'];
 $onlyAdmins = !$_['allGroupAdmins'] && !$_['includeGroups'];
+// The group picker of core separates the ids with "|": a group whose id contains it can not
+// be shown there. Such groups stay in the list (the page sends them back unchanged).
+$pickableGroups = [];
+$lockedGroups = [];
+foreach ($_['includedGroups'] as $gid) {
+	if (\strpos($gid, '|') === false) {
+		$pickableGroups[] = $gid;
+	} else {
+		$lockedGroups[] = $gid;
+	}
+}
 ?>
 <div class="section" id="impersonateTemplateSettings">
 
@@ -51,9 +62,42 @@ $onlyAdmins = !$_['allGroupAdmins'] && !$_['includeGroups'];
 	<p id="selectIncludedGroups" class="indent <?php if (!$_['includeGroups']) {
 		p('hidden');
 	} ?>">
+		<?php // the value is what the group picker of core expects, the lists themselves travel as JSON?>
 		<input name="impersonate_include_groups_list" type="hidden" id="includedGroups"
-			value="<?php p(\implode('|', $_['includedGroups'])); ?>" style="width: 400px"/>
+			value="<?php p(\implode('|', $pickableGroups)); ?>"
+			data-groups="<?php p((string)\json_encode($pickableGroups)); ?>"
+			data-locked-groups="<?php p((string)\json_encode($lockedGroups)); ?>" style="width: 400px"/>
 		<br />
+		<?php if ($lockedGroups !== []): ?>
+		<em id="impersonateLockedGroups"><?php p($l->t('Also in the list, but not editable here because their id contains "|": %s', [\implode(', ', $lockedGroups)]));?></em>
+		<?php endif; ?>
 	</p>
+	<p class="<?php if (!$_['appEnabled']) {
+		p('hidden');
+	}?>">
+		<input type="checkbox" id="impersonateGroupAdminTargets" class="checkbox"
+			<?php if ($_['allowGroupAdminTargets']) {
+				print_unescaped('checked="checked"');
+			} ?> />
+		<label for="impersonateGroupAdminTargets"><?php p($l->t('Allow group admins to impersonate members who are group admins themselves'));?></label><br/>
+		<em><?php p($l->t('Such a member may administer other groups. The impersonating group admin would act with those rights as well.'));?></em>
+	</p>
+	<p class="settings-hint" id="impersonateMaxDurationHint">
+		<?php if ($_['maxDurationMinutes'] > 0) {
+			p($l->t('An impersonation ends after %s minutes at the latest (app config "max_duration_minutes").', [$_['maxDurationMinutes']]));
+		} else {
+			p($l->t('The duration of an impersonation is not limited (app config "max_duration_minutes" is 0).'));
+		} ?>
+	</p>
+	<?php if ($_['forbiddenPrefixes'] !== []): ?>
+	<p class="settings-hint" id="impersonateForbiddenPrefixes">
+		<?php p($l->t('Refused during an impersonation in addition to the built-in list (app config "forbidden_prefixes"): %s', [\implode(' ', $_['forbiddenPrefixes'])]));?>
+	</p>
+	<?php endif; ?>
+	<?php if ($_['ignoredForbiddenPrefixes'] !== []): ?>
+	<p class="settings-hint" id="impersonateIgnoredForbiddenPrefixes">
+		<strong><?php p($l->t('Entries of the app config "forbidden_prefixes" that are not a path prefix like "/apps/someapp/" and are ignored: %s', [\implode(' ', $_['ignoredForbiddenPrefixes'])]));?></strong>
+	</p>
+	<?php endif; ?>
 
 </div>

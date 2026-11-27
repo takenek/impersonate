@@ -14,8 +14,80 @@ updates:
           - minor
           - patch
 
+  # the QA tools of CI have their own lockfiles (vendor-bin/*/composer.lock)
+  - package-ecosystem: composer
+    directory: "/vendor-bin/behat"
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '22:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: composer
+    directory: "/vendor-bin/owncloud-codestyle"
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '22:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: composer
+    directory: "/vendor-bin/phan"
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '22:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: composer
+    directory: "/vendor-bin/phpstan"
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '22:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: npm
     directory: "/"
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '22:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # the browser test library (tests/ui/package-lock.json)
+  - package-ecosystem: npm
+    directory: "/tests/ui"
     schedule:
       interval: weekly
       day: sunday

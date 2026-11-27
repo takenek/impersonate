@@ -43,6 +43,12 @@ class PolicyTest extends TestCase {
 	private $subAdminOf = [];
 	/** @var bool */
 	private $groupAdminFeature = true;
+	/** @var string[] */
+	private $existingGroups = ['g1', 'g2', 'g3'];
+	/** @var array[] [key, value] of the setAppValue() calls */
+	private $written = [];
+	/** @var int|null number of the setAppValue() call that fails */
+	private $failOnWrite;
 
 	protected function setUp(): void {
 		parent::setUp();
@@ -69,6 +75,27 @@ class PolicyTest extends TestCase {
 		});
 		$this->subAdmin->method('isSubAdmin')->willReturnCallback(function (IUser $user) {
 			return $this->groupAdminFeature && !empty($this->subAdminOf[$user->getUID()]);
+		});
+		$this->subAdmin->method('getAllSubAdmins')->willReturnCallback(function () {
+			$all = [];
+			foreach ($this->subAdminOf as $uid => $gids) {
+				foreach ($gids as $gid) {
+					$group = $this->createMock(IGroup::class);
+					$group->method('getGID')->willReturn($gid);
+					$all[] = ['user' => $this->user((string)$uid), 'group' => $group];
+				}
+			}
+			return $all;
+		});
+		$this->groupManager->method('groupExists')->willReturnCallback(function ($gid) {
+			return \in_array($gid, $this->existingGroups, true);
+		});
+		$this->config->method('setAppValue')->willReturnCallback(function ($app, $key, $value) {
+			$this->written[] = [$key, $value];
+			if ($this->failOnWrite !== null && \count($this->written) === $this->failOnWrite) {
+				throw new \RuntimeException('database down');
+			}
+			$this->appConfig[$key] = $value;
 		});
 		$this->subAdmin->method('getSubAdminsGroups')->willReturnCallback(function (IUser $user) {
 			if (!$this->groupAdminFeature) {
@@ -228,5 +255,208 @@ class PolicyTest extends TestCase {
 		$policy = $this->policy();
 		$this->assertTrue($policy->isAllGroupAdminsMode());
 		$this->assertFalse($policy->isIncludeGroupsMode());
+	}
+
+	public function testGroupAdminsCanNotImpersonateGroupAdminsByDefault(): void {
+		$this->appConfig['impersonate_all_groupadmins'] = 'true';
+		// erin is a member of carol's group and administers another group
+		$this->subAdminOf = ['carol' => ['g1'], 'erin' => ['g2']];
+		$this->memberships = ['alice' => ['g1'], 'erin' => ['g1']];
+		$policy = $this->policy();
+		$this->assertNull($policy->check($this->user('carol'), $this->user('alice')));
+		$this->assertSame(Policy::ERROR_ADMIN_TARGET, $policy->check($this->user('carol'), $this->user('erin')));
+		$this->assertSame(['erin'], $policy->getGroupAdminUidsInGroups(['g1']));
+		$this->assertSame([], $policy->getGroupAdminUidsInGroups([]));
+		// administrators are not restricted
+		$this->assertNull($policy->check($this->user('admin'), $this->user('erin')));
+	}
+
+	public function testGroupAdminsCanImpersonateGroupAdminsWhenThatIsAllowed(): void {
+		$this->appConfig['impersonate_all_groupadmins'] = 'true';
+		$this->appConfig['impersonate_allow_groupadmin_targets'] = 'true';
+		$this->subAdminOf = ['carol' => ['g1'], 'erin' => ['g2']];
+		$this->memberships = ['erin' => ['g1']];
+		$policy = $this->policy();
+		$this->assertTrue($policy->allowsGroupAdminTargets());
+		$this->assertNull($policy->check($this->user('carol'), $this->user('erin')));
+		$this->assertSame([], $policy->getGroupAdminUidsInGroups(['g1']));
+	}
+
+	public static function maxDurationProvider(): array {
+		return [
+			'default' => [null, 3600],
+			'configured' => ['15', 900],
+			'no limit' => ['0', 0],
+			// a broken value never removes the limit
+			'empty' => ['', 3600],
+			'negative' => ['-5', 3600],
+			'not a number' => ['unlimited', 3600],
+			'fraction' => ['1.5', 3600],
+			'too long' => ['99999999', 3600],
+		];
+	}
+
+	/**
+	 * @dataProvider maxDurationProvider
+	 */
+	public function testMaxDuration(?string $configured, int $seconds): void {
+		if ($configured !== null) {
+			$this->appConfig['max_duration_minutes'] = $configured;
+		}
+		$this->assertSame($seconds, $this->policy()->getMaxDuration());
+	}
+
+	public function testHasExceededMaxDuration(): void {
+		$policy = $this->policy();
+		$this->assertFalse($policy->hasExceededMaxDuration(1000, 1000 + 3600));
+		$this->assertTrue($policy->hasExceededMaxDuration(1000, 1000 + 3601));
+		$this->assertFalse($policy->hasExceededMaxDuration(\time()));
+		// an impersonation without a known start can not be bounded
+		$this->assertTrue($policy->hasExceededMaxDuration(null));
+		$this->appConfig['max_duration_minutes'] = '0';
+		$this->assertFalse($policy->hasExceededMaxDuration(1000, 1000 + 10 ** 8));
+		$this->assertFalse($policy->hasExceededMaxDuration(null));
+	}
+
+	public static function forbiddenPrefixesProvider(): array {
+		return [
+			['["/apps/tokens/","/apps/Other_App/api/v1/"]', ['/apps/tokens/', '/apps/other_app/api/v1/'], []],
+			['["/apps/tokens/","/apps/tokens/","/apps/Tokens"]', ['/apps/tokens/'], []],
+			// a missing trailing slash is added: such an entry must not be dropped silently
+			['["/apps/tokens"]', ['/apps/tokens/'], []],
+			// the guard compares paths without their entry point: so are the prefixes
+			['["/index.php/apps/tokens/","/ocs/v1.php/cloud/users","/OCS/v2.php/Cloud/Users/"]', ['/apps/tokens/', '/cloud/users/'], []],
+			// an entry point alone is no prefix
+			['["/index.php/","/ocs/v1.php"]', [], ['/index.php/', '/ocs/v1.php']],
+			// only plain paths: nothing that could match everything, and what is ignored is named
+			[
+				'["/","//","apps/tokens/","/apps//x/","/apps/to kens/","/apps/t%6fkens/","","/apps/tokens/\n",5,["/apps/x/"],"/apps/ok/"]',
+				['/apps/ok/'],
+				['/', '//', 'apps/tokens/', '/apps//x/', '/apps/to kens/', '/apps/t%6fkens/', '', "/apps/tokens/\n", '5', '["\/apps\/x\/"]'],
+			],
+			// not a list at all: nothing is used, the whole value is reported
+			['"/apps/tokens/"', [], ['"/apps/tokens/"']],
+			['{"a":"/apps/tokens/"}', [], ['{"a":"/apps/tokens/"}']],
+			['garbage', [], ['garbage']],
+			['', [], []],
+			['[]', [], []],
+		];
+	}
+
+	/**
+	 * @dataProvider forbiddenPrefixesProvider
+	 */
+	public function testExtraForbiddenPrefixes(string $configured, array $expected, array $ignored): void {
+		$this->appConfig['forbidden_prefixes'] = $configured;
+		$this->assertSame($expected, $this->policy()->getExtraForbiddenPrefixes());
+		$this->assertSame($ignored, $this->policy()->getIgnoredForbiddenPrefixes());
+	}
+
+	public function testStartWithCredentialsIsOffUnlessTheOperatorTurnsItOn(): void {
+		$this->assertFalse($this->policy()->allowsStartWithCredentials());
+		foreach (['yes', '1', 'TRUE', ''] as $value) {
+			$this->appConfig['allow_start_with_credentials'] = $value;
+			$this->assertFalse($this->policy()->allowsStartWithCredentials(), $value);
+		}
+		$this->appConfig['allow_start_with_credentials'] = 'true';
+		$this->assertTrue($this->policy()->allowsStartWithCredentials());
+	}
+
+	public function testDescribe(): void {
+		$policy = $this->policy();
+		$this->assertSame(['mode' => Policy::MODE_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => false], $policy->describe());
+		$this->appConfig['impersonate_include_groups'] = 'true';
+		$this->appConfig['impersonate_include_groups_list'] = '["g1"]';
+		$this->appConfig['impersonate_allow_groupadmin_targets'] = 'true';
+		$this->assertSame(['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g1'], 'allowGroupAdminTargets' => true], $policy->describe());
+		$this->appConfig['impersonate_all_groupadmins'] = 'true';
+		// the list is not in effect
+		$this->assertSame(['mode' => Policy::MODE_ALL_GROUP_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => true], $policy->describe());
+	}
+
+	public function testStoreKeepsOnlyExistingGroups(): void {
+		$stored = $this->policy()->store(Policy::MODE_INCLUDE_GROUPS, ['g1', 'gone', 'g1', '', 5, ['g2'], 'g3'], true);
+		$this->assertSame(['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g1', 'g3'], 'allowGroupAdminTargets' => true], $stored);
+		$this->assertSame('["g1","g3"]', $this->appConfig['impersonate_include_groups_list']);
+		$this->assertSame('true', $this->appConfig['impersonate_include_groups']);
+		$this->assertSame('false', $this->appConfig['impersonate_all_groupadmins']);
+		$this->assertSame('true', $this->appConfig['impersonate_allow_groupadmin_targets']);
+	}
+
+	public function testStoreForgetsTheGroupListInTheOtherModes(): void {
+		$this->appConfig['impersonate_include_groups'] = 'true';
+		$this->appConfig['impersonate_include_groups_list'] = '["g1"]';
+		$stored = $this->policy()->store(Policy::MODE_ALL_GROUP_ADMINS, ['g1'], false);
+		$this->assertSame(['mode' => Policy::MODE_ALL_GROUP_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => false], $stored);
+		$this->assertSame('[]', $this->appConfig['impersonate_include_groups_list']);
+		$this->assertSame('false', $this->appConfig['impersonate_include_groups']);
+	}
+
+	public function testStoreRefusesAnUnknownModeWithoutWritingAnything(): void {
+		try {
+			$this->policy()->store('everybody', [], true);
+			$this->fail('exception expected');
+		} catch (\InvalidArgumentException $e) {
+		}
+		$this->assertSame([], $this->written);
+	}
+
+	public static function transitionProvider(): array {
+		$admins = ['mode' => Policy::MODE_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => false];
+		$all = ['mode' => Policy::MODE_ALL_GROUP_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => true];
+		$g1 = ['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g1'], 'allowGroupAdminTargets' => false];
+		$g2 = ['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g2'], 'allowGroupAdminTargets' => true];
+		$cases = [];
+		foreach (['admins' => $admins, 'all' => $all, 'g1' => $g1, 'g2' => $g2] as $fromName => $from) {
+			foreach (['admins' => $admins, 'all' => $all, 'g1' => $g1, 'g2' => $g2] as $toName => $to) {
+				for ($failing = 1; $failing <= 5; $failing++) {
+					$cases["$fromName -> $toName, write $failing fails"] = [$from, $to, $failing];
+				}
+			}
+		}
+		return $cases;
+	}
+
+	/**
+	 * @dataProvider transitionProvider
+	 */
+	public function testAStoreThatFailsHalfWayNeverLeavesABroaderPolicy(array $from, array $to, int $failing): void {
+		$policy = $this->policy();
+		$policy->store($from['mode'], $from['groups'], $from['allowGroupAdminTargets']);
+		$this->assertSame($from, $policy->describe());
+		$this->written = [];
+		$this->failOnWrite = $failing;
+		try {
+			$policy->store($to['mode'], $to['groups'], $to['allowGroupAdminTargets']);
+		} catch (\RuntimeException $e) {
+		}
+		$left = $policy->describe();
+		// May a group admin of $gid impersonate a member of it (who is a group admin or not)?
+		$permits = static function (array $policy, string $gid, bool $targetIsGroupAdmin): bool {
+			$group = $policy['mode'] === Policy::MODE_ALL_GROUP_ADMINS
+				|| ($policy['mode'] === Policy::MODE_INCLUDE_GROUPS && \in_array($gid, $policy['groups'], true));
+			return $group && (!$targetIsGroupAdmin || $policy['allowGroupAdminTargets']);
+		};
+		// whatever is left allows nothing that neither the old nor the new policy allows
+		foreach ($this->existingGroups as $gid) {
+			foreach ([false, true] as $targetIsGroupAdmin) {
+				$this->assertTrue(
+					!$permits($left, $gid, $targetIsGroupAdmin)
+						|| $permits($from, $gid, $targetIsGroupAdmin)
+						|| $permits($to, $gid, $targetIsGroupAdmin),
+					"$gid, group admin as target: " . \var_export($targetIsGroupAdmin, true) . ', left: ' . \json_encode($left)
+				);
+			}
+		}
+	}
+
+	public function testForgetGroup(): void {
+		$this->appConfig['impersonate_include_groups_list'] = '["g1","g2"]';
+		$policy = $this->policy();
+		$policy->forgetGroup('g1');
+		$this->assertSame('["g2"]', $this->appConfig['impersonate_include_groups_list']);
+		$this->written = [];
+		$policy->forgetGroup('unrelated');
+		$this->assertSame([], $this->written, 'nothing is written for a group that is not listed');
 	}
 }

@@ -2,8 +2,8 @@
 /**
  * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
  * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
- * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
- * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * Modified on 2026-11-26 and 2026-11-27 by Marek Królikowski (TaKeN): ownCloud 11.1 support and
+ * security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
  * See LICENSE and COPYRIGHT.
  *
  * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
@@ -19,7 +19,9 @@
 
 namespace OCA\Impersonate\Controller;
 
+use OCA\Impersonate\AuditTrail;
 use OCA\Impersonate\Policy;
+use OCA\Impersonate\RefusedException;
 use OCA\Impersonate\Util;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http;
@@ -30,8 +32,6 @@ use OCP\ILogger;
 use OCP\IRequest;
 use OCP\IUserManager;
 use OCP\IUserSession;
-use Symfony\Component\EventDispatcher\EventDispatcherInterface;
-use Symfony\Component\EventDispatcher\GenericEvent;
 
 class SettingsController extends Controller {
 	/** @var IUserManager */
@@ -48,8 +48,8 @@ class SettingsController extends Controller {
 	private $policy;
 	/** @var Util */
 	private $util;
-	/** @var EventDispatcherInterface */
-	private $eventDispatcher;
+	/** @var AuditTrail */
+	private $auditTrail;
 
 	public function __construct(
 		$appName,
@@ -61,7 +61,7 @@ class SettingsController extends Controller {
 		IL10N $l10n,
 		Policy $policy,
 		Util $util,
-		EventDispatcherInterface $eventDispatcher
+		AuditTrail $auditTrail
 	) {
 		parent::__construct($appName, $request);
 		$this->userManager = $userManager;
@@ -71,13 +71,14 @@ class SettingsController extends Controller {
 		$this->l = $l10n;
 		$this->policy = $policy;
 		$this->util = $util;
-		$this->eventDispatcher = $eventDispatcher;
+		$this->auditTrail = $auditTrail;
 	}
 
 	/**
 	 * Data the users page needs to decide where to show the impersonate icon:
 	 * [included groups (JSON), include groups mode, all group admins mode, isAdmin, isGroupAdmin,
-	 *  admins within the group admin's groups (JSON)]
+	 *  members of the group admin's groups the group admin can not impersonate (JSON): administrators
+	 *  and - unless such targets are allowed - group admins]
 	 * The delegation policy is only revealed to users who can impersonate.
 	 *
 	 * @NoAdminRequired
@@ -107,7 +108,14 @@ class SettingsController extends Controller {
 				$this->policy->isAllGroupAdminsMode() ? 'true' : 'false',
 				false,
 				true,
-				\json_encode($this->policy->getAdminUidsInGroups($groups)),
+				\json_encode(\array_values(\array_diff(
+					\array_unique(\array_merge(
+						$this->policy->getAdminUidsInGroups($groups),
+						$this->policy->getGroupAdminUidsInGroups($groups)
+					)),
+					// that the user can not impersonate themselves needs no entry
+					[$currentUser->getUID()]
+				))),
 			]);
 		}
 		return new JSONResponse(['[]', 'false', 'false', false, false, '[]']);
@@ -147,6 +155,18 @@ class SettingsController extends Controller {
 				]
 			);
 			return $this->error('stopNestedImpersonation', $this->l->t('Can not impersonate'));
+		}
+
+		// An impersonation starts from the browser session of the impersonator and from
+		// nothing else: a request that brings its own credentials (HTTP Basic, a token) is
+		// not one, even if the platform gave it a session. Such requests do not need the
+		// CSRF token either, so they must not be able to switch a session.
+		if (!$this->policy->allowsStartWithCredentials() && $this->requestCarriesCredentials()) {
+			$this->logger->warning(
+				'Impersonation by "{impersonator}" refused: an impersonation must be started from an interactive session (the request carries credentials)',
+				['app' => 'impersonate', 'impersonator' => $impersonator]
+			);
+			return $this->error(Policy::ERROR_CANNOT_IMPERSONATE, $this->l->t('Can not impersonate'));
 		}
 
 		// Decide whether the user may impersonate at all before looking at the
@@ -199,9 +219,22 @@ class SettingsController extends Controller {
 
 		try {
 			$this->util->startImpersonation($user, $currentUser);
-		} catch (\Exception $e) {
-			$this->logger->logException($e, ['app' => 'impersonate']);
+		} catch (RefusedException $e) {
+			// nothing was changed, e.g. a request authenticated with HTTP Basic credentials
+			$this->logger->warning(
+				'Impersonation of user "{target}" by "{impersonator}" refused: {reason}',
+				['app' => 'impersonate', 'impersonator' => $impersonator, 'target' => $targetUid, 'reason' => $e->getMessage()]
+			);
 			return $this->error(Policy::ERROR_CANNOT_IMPERSONATE, $this->l->t('Can not impersonate'));
+		} catch (\Throwable $e) {
+			// The switch failed: the session may have been logged out (Util rolls a partial
+			// switch back). Not the answer of a refusal: the browser must not offer a retry
+			// on a page whose session may be gone.
+			$this->logger->logException($e, ['app' => 'impersonate']);
+			return new JSONResponse(
+				['error' => 'switchFailed', 'message' => $this->l->t('Can not impersonate')],
+				Http::STATUS_INTERNAL_SERVER_ERROR
+			);
 		}
 
 		$this->logger->warning(
@@ -213,9 +246,76 @@ class SettingsController extends Controller {
 				'remote' => $this->request->getRemoteAddress(),
 			]
 		);
-		$startEvent = new GenericEvent(null, ['impersonator' => $impersonator, 'targetUser' => $targetUid]);
-		$this->eventDispatcher->dispatch($startEvent, 'user.afterimpersonate');
+		// the switch has happened: a failing event consumer does not change the answer
+		$this->auditTrail->started($impersonator, $targetUid);
 		return new JSONResponse();
+	}
+
+	/**
+	 * Store the delegation policy as a whole (administrators only: no
+	 * NoAdminRequired annotation; the CSRF token is required).
+	 * The answer is the policy the server applies from now on.
+	 *
+	 * The parameters are request values as they come (no type is declared, so
+	 * the framework does not cast them), they are validated here.
+	 *
+	 * @param mixed $mode Policy::MODE_*
+	 * @param mixed $groups list of group ids for Policy::MODE_INCLUDE_GROUPS
+	 * @param mixed $allowGroupAdminTargets true (or the string "true"): group admins may
+	 *                                      impersonate members who are group admins;
+	 *                                      anything else: they may not
+	 * @return JSONResponse
+	 */
+	public function setPolicy($mode, $groups = [], $allowGroupAdminTargets = false) {
+		$currentUser = $this->userSession->getUser();
+		// not left to the framework alone: the policy decides who can take over which account
+		if ($currentUser === null || !$this->policy->isAdmin($currentUser) || $this->util->isImpersonating()) {
+			return new JSONResponse(['error' => 'forbidden'], Http::STATUS_FORBIDDEN);
+		}
+		if (!\is_string($mode) || !\is_array($groups)) {
+			return new JSONResponse(['error' => 'invalidPolicy', 'policy' => $this->policy->describe()], Http::STATUS_BAD_REQUEST);
+		}
+		try {
+			$stored = $this->policy->store(
+				$mode,
+				$groups,
+				$allowGroupAdminTargets === true || $allowGroupAdminTargets === 'true'
+			);
+		} catch (\InvalidArgumentException $e) {
+			return new JSONResponse(['error' => 'invalidPolicy', 'policy' => $this->policy->describe()], Http::STATUS_BAD_REQUEST);
+		} catch (\Throwable $e) {
+			$this->logger->logException($e, ['app' => 'impersonate']);
+			return new JSONResponse(['error' => 'notSaved'], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+		$this->logger->warning(
+			'User "{admin}" set the impersonation policy to {mode} (groups: {groups}; group admins as targets: {targets})',
+			[
+				'app' => 'impersonate',
+				'admin' => $currentUser->getUID(),
+				'mode' => $stored['mode'],
+				'groups' => \json_encode($stored['groups']),
+				'targets' => $stored['allowGroupAdminTargets'] ? 'allowed' : 'not allowed',
+			]
+		);
+		return new JSONResponse(['policy' => $stored]);
+	}
+
+	/**
+	 * Does the request authenticate itself (HTTP Basic, a token) instead of
+	 * relying on the session cookie?
+	 */
+	private function requestCarriesCredentials(): bool {
+		foreach ([
+			$this->request->getHeader('Authorization'),
+			$_SERVER['PHP_AUTH_USER'] ?? null,
+			$_SERVER['PHP_AUTH_PW'] ?? null,
+			$_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? null,
+		] as $value) {
+			if (\is_string($value) && \trim($value) !== '') {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private function error(string $code, string $message): JSONResponse {

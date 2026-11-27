@@ -3,8 +3,8 @@
 /**
  * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
  * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
- * Modified on 2026-11-26 by Marek Królikowski (TaKeN): ownCloud 11.1 support and security
- * hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * Modified on 2026-11-26 and 2026-11-27 by Marek Królikowski (TaKeN): ownCloud 11.1 support and
+ * security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
  * See LICENSE and COPYRIGHT.
  *
  * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
@@ -45,6 +45,7 @@ class UserImpersonatePage extends UsersPage {
 	 */
 	protected $path = '/index.php/settings/users';
 	protected string $impersonateXpath = './/a[@class="action permanent impersonate"]';
+	protected string $confirmXpath = '//div[contains(@class, "oc-dialog-buttonrow")]//button[contains(@class, "primary")]';
 	protected string $userXpath = '//span[contains(@id,"expandDisplayName") and text()="%s"]';
 	protected string $impersonateNotificationXpath = '//div[@id="notification-container"]//div[@id="impersonate-notification"]//a';
 
@@ -62,6 +63,13 @@ class UserImpersonatePage extends UsersPage {
 			__METHOD__ . " could not find element with the xpath '$this->impersonateXpath'"
 		);
 		$impersonateButton->click();
+		// the icon asks before it switches: answer the confirmation with "Yes"
+		$confirmButton = $this->waitTillXpathIsVisible($this->confirmXpath);
+		$this->assertElementNotNull(
+			$confirmButton,
+			__METHOD__ . " could not find element with the xpath '$this->confirmXpath'"
+		);
+		$confirmButton->click();
 		$this->waitForAjaxCallsToStartAndFinish($session);
 	}
 

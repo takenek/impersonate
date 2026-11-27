@@ -20,7 +20,6 @@ namespace OCA\Impersonate;
 use OCP\ILogger;
 use OCP\IRequest;
 use OCP\IUserSession;
-use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\EventDispatcher\GenericEvent;
 
 /**
@@ -32,6 +31,8 @@ use Symfony\Component\EventDispatcher\GenericEvent;
  * impersonator. Every other logout (session revoked, token invalid,
  * user disabled, auth header mismatch, password reset, ...) is a security
  * logout: the impersonation is ended and the logout proceeds.
+ *
+ * The end event is dispatched by Util for every way an impersonation ends.
  */
 class LogoutListener {
 	/** @var Util */
@@ -40,8 +41,6 @@ class LogoutListener {
 	private $userSession;
 	/** @var IRequest */
 	private $request;
-	/** @var EventDispatcherInterface */
-	private $eventDispatcher;
 	/** @var ILogger */
 	private $logger;
 
@@ -49,13 +48,11 @@ class LogoutListener {
 		Util $util,
 		IUserSession $userSession,
 		IRequest $request,
-		EventDispatcherInterface $eventDispatcher,
 		ILogger $logger
 	) {
 		$this->util = $util;
 		$this->userSession = $userSession;
 		$this->request = $request;
-		$this->eventDispatcher = $eventDispatcher;
 		$this->logger = $logger;
 	}
 
@@ -66,8 +63,11 @@ class LogoutListener {
 		if ($impersonator === null || !$event->hasArgument('cancel')) {
 			return;
 		}
-		$currentUser = $this->userSession->getUser();
-		$target = $currentUser !== null ? $currentUser->getUID() : '';
+		$target = $this->util->getTargetUid();
+		if ($target === null) {
+			$currentUser = $this->userSession->getUser();
+			$target = $currentUser !== null ? $currentUser->getUID() : '';
+		}
 		$remote = $this->request->getRemoteAddress();
 
 		if ($this->isUserInitiatedLogout() && $this->util->stopImpersonation()) {
@@ -77,15 +77,13 @@ class LogoutListener {
 				['app' => 'impersonate', 'impersonator' => $impersonator, 'target' => $target, 'remote' => $remote]
 			);
 		} else {
-			// stopImpersonation() already cleaned up if it failed
-			$this->util->endImpersonation();
+			// stopImpersonation() already ended the impersonation if it failed
+			$this->util->endImpersonation(Util::REASON_LOGOUT);
 			$this->logger->warning(
 				'Impersonation of user "{target}" by "{impersonator}" ended by a logout of the session (from {remote})',
 				['app' => 'impersonate', 'impersonator' => $impersonator, 'target' => $target, 'remote' => $remote]
 			);
 		}
-		$stopEvent = new GenericEvent(null, ['impersonator' => $impersonator, 'targetUser' => $target]);
-		$this->eventDispatcher->dispatch($stopEvent, 'user.afterimpersonatelogout');
 	}
 
 	/**

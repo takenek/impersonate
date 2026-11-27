@@ -6,7 +6,6 @@ OC.L10N.register(
     "Unexpected error occurred" : "ئويلىمىغان خاتالىق يۈز بەردى",
     "Impersonate" : "تەقلىد قىلىش",
     "Error" : "خاتالىق",
-    "Logged in as {currentUser}" : "{CurrentUser as دەپ تىزىملىتىڭ",
     "Impersonate Settings" : "تەڭشەكلەر",
     "Only an administrator is allowed to impersonate users" : "پەقەت باشقۇرغۇچىنىڭلا ئابونتلارنى دوراشقا رۇخسەت قىلىنىدۇ",
     "Allow all group admins to impersonate users within the groups they are admins of" : "بارلىق گۇرۇپپا باشقۇرغۇچىلارنىڭ ئۆزلىرى باشقۇرۇۋاتقان گۇرۇپپىلار ئىچىدىكى ئابونتلارنى تەقلىد قىلىشىغا يول قويۇڭ",

@@ -95,3 +95,27 @@ Feature: Impersonate
     And parameter "impersonate_include_groups_list" of app "impersonate" has been set to '["group1"]'
     When "Bob" sends a request to impersonate user "Alice"
     Then the HTTP status code should be "404"
+
+  Scenario Outline: An impersonation can not be started with HTTP Basic credentials (no interactive session)
+    Given "allow all group admins" option in impersonate settings has been set to "true"
+    # both may impersonate Alice from a session ...
+    When "<requester>" sends a request to impersonate user "Alice"
+    Then the HTTP status code should be "200"
+    # ... but not like this
+    When "<requester>" sends a request with HTTP Basic credentials to impersonate user "Alice"
+    Then the HTTP status code should be "404"
+    Examples:
+      | requester |
+      | admin     |
+      | Bob       |
+
+  Scenario: A group admin can not impersonate a member who is a group admin unless that is allowed
+    Given "allow all group admins" option in impersonate settings has been set to "true"
+    And user "Alice" has been made a subadmin of group "group2"
+    When "Bob" sends a request to impersonate user "Alice"
+    Then the HTTP status code should be "404"
+    When "admin" sends a request to impersonate user "Alice"
+    Then the HTTP status code should be "200"
+    Given "allow group admins as targets" option in impersonate settings has been set to "true"
+    When "Bob" sends a request to impersonate user "Alice"
+    Then the HTTP status code should be "200"

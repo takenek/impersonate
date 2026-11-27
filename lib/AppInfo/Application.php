@@ -17,9 +17,15 @@
 
 namespace OCA\Impersonate\AppInfo;
 
+use OC\Authentication\Token\DefaultTokenProvider;
+use OCA\Impersonate\ActiveImpersonations;
+use OCA\Impersonate\AuditTrail;
+use OCA\Impersonate\Command\Active;
+use OCA\Impersonate\CredentialCleanup;
 use OCA\Impersonate\ImpersonationGuard;
 use OCA\Impersonate\LogoutListener;
 use OCA\Impersonate\Policy;
+use OCA\Impersonate\Reconciler;
 use OCA\Impersonate\Util;
 use OCP\AppFramework\App;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
@@ -44,15 +50,58 @@ class Application extends App {
 		$container->registerService(EventDispatcherInterface::class, function () use ($server) {
 			return $server->getEventDispatcher();
 		});
-		$container->registerService(Util::class, function () {
-			return Util::fromServer();
+		$container->registerService(DefaultTokenProvider::class, function () use ($server) {
+			return $server->query(DefaultTokenProvider::class);
+		});
+		$container->registerService(AuditTrail::class, function () use ($server) {
+			return new AuditTrail(
+				$server->getEventDispatcher(),
+				$server->getNotificationManager(),
+				$server->getLogger()
+			);
+		});
+		$container->registerService(ActiveImpersonations::class, function () use ($server) {
+			return new ActiveImpersonations(
+				$server->getConfig(),
+				$server->getSecureRandom(),
+				$server->getJobList(),
+				$server->getDatabaseConnection(),
+				$server->getLogger()
+			);
+		});
+		$container->registerService(CredentialCleanup::class, function ($c) use ($server) {
+			return new CredentialCleanup(
+				$c->query(DefaultTokenProvider::class),
+				$server->getConfig(),
+				$c->query(AuditTrail::class),
+				$server->getLogger()
+			);
+		});
+		$container->registerService(Util::class, function ($c) use ($server) {
+			/** @var \OC\User\Session $userSession */
+			$userSession = $server->getUserSession();
+			/** @var \OC\Security\CSRF\CsrfTokenManager $csrfTokenManager */
+			$csrfTokenManager = \OC::$server->getCsrfTokenManager();
+			return new Util(
+				$server->getSession(),
+				$userSession,
+				$c->query(DefaultTokenProvider::class),
+				$server->getUserManager(),
+				$server->getSecureRandom(),
+				$csrfTokenManager,
+				$server->getLogger(),
+				$server->getConfig(),
+				$c->query(ActiveImpersonations::class),
+				$c->query(CredentialCleanup::class),
+				$c->query(AuditTrail::class),
+				$c->query(Policy::class)
+			);
 		});
 		$container->registerService(LogoutListener::class, function ($c) use ($server) {
 			return new LogoutListener(
 				$c->query(Util::class),
 				$server->getUserSession(),
 				$server->getRequest(),
-				$server->getEventDispatcher(),
 				$server->getLogger()
 			);
 		});
@@ -63,8 +112,24 @@ class Application extends App {
 				$server->getUserSession(),
 				$server->getUserManager(),
 				$server->getRequest(),
+				$server->getLogger(),
+				$c->query(ActiveImpersonations::class),
+				$c->query(CredentialCleanup::class),
+				$c->query(Reconciler::class)
+			);
+		});
+		$container->registerService(Reconciler::class, function ($c) use ($server) {
+			return new Reconciler(
+				$c->query(ActiveImpersonations::class),
+				$c->query(CredentialCleanup::class),
+				$c->query(Policy::class),
+				$server->getUserManager(),
+				$c->query(AuditTrail::class),
 				$server->getLogger()
 			);
+		});
+		$container->registerService(Active::class, function ($c) {
+			return new Active($c->query(Reconciler::class));
 		});
 	}
 }

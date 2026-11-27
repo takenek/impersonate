@@ -54,7 +54,7 @@ else
 	mkdir -p "$OC_DIR/apps/impersonate"
 	tar -C "$APP_SRC" \
 		--exclude=./.git --exclude=./node_modules --exclude=./build \
-		--exclude='./vendor-bin/*/vendor' --exclude=./tests/output \
+		--exclude='./vendor-bin/*/vendor' --exclude=./tests/output --exclude=./tests/ui/node_modules \
 		-cf - . | tar -C "$OC_DIR/apps/impersonate" -xf -
 fi
 

@@ -3,7 +3,7 @@ OC.L10N.register(
     {
     "Impersonate" : "Udgiv",
     "Error" : "Fejl",
-    "Logged in as {currentUser}" : "Logget ind som {nuværendeBruger}",
+    "Logged in as {currentUser}" : "Logget ind som {currentUser}",
     "Impersonate Settings" : "Udgivelsesindstillinger",
     "Allow group admins to impersonate users from these groups" : "Tillad gruppeadministratorer at udgive sig for at være brugere fra disse grupper"
 },

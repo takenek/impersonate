@@ -24,7 +24,6 @@ use OCP\IRequest;
 use OCP\IUser;
 use OCP\IUserSession;
 use PHPUnit\Framework\MockObject\MockObject;
-use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\EventDispatcher\GenericEvent;
 use Test\TestCase;
 
@@ -35,8 +34,6 @@ class LogoutListenerTest extends TestCase {
 	private $userSession;
 	/** @var IRequest|MockObject */
 	private $request;
-	/** @var EventDispatcherInterface|MockObject */
-	private $eventDispatcher;
 	/** @var ILogger|MockObject */
 	private $logger;
 	/** @var LogoutListener */
@@ -51,13 +48,11 @@ class LogoutListenerTest extends TestCase {
 		$this->userSession->method('getUser')->willReturn($alice);
 		$this->request = $this->createMock(IRequest::class);
 		$this->request->method('getRemoteAddress')->willReturn('10.0.0.1');
-		$this->eventDispatcher = $this->createMock(EventDispatcherInterface::class);
 		$this->logger = $this->createMock(ILogger::class);
 		$this->listener = new LogoutListener(
 			$this->util,
 			$this->userSession,
 			$this->request,
-			$this->eventDispatcher,
 			$this->logger
 		);
 	}
@@ -69,20 +64,10 @@ class LogoutListenerTest extends TestCase {
 		$this->request->method('passesCSRFCheck')->willReturn($csrfOk);
 	}
 
-	private function expectStopEvent(): void {
-		$this->eventDispatcher->expects($this->once())->method('dispatch')->with(
-			$this->callback(function (GenericEvent $e) {
-				return $e->getArgument('impersonator') === 'admin' && $e->getArgument('targetUser') === 'alice';
-			}),
-			'user.afterimpersonatelogout'
-		);
-	}
-
 	public function testNotImpersonating(): void {
 		$this->util->method('getImpersonatorUid')->willReturn(null);
 		$this->util->expects($this->never())->method('stopImpersonation');
 		$this->util->expects($this->never())->method('endImpersonation');
-		$this->eventDispatcher->expects($this->never())->method('dispatch');
 		$event = new GenericEvent(null, ['cancel' => false]);
 		$this->listener->onPreLogout($event);
 		$this->assertFalse($event->getArgument('cancel'));
@@ -98,9 +83,15 @@ class LogoutListenerTest extends TestCase {
 	public function testUserLogoutSwitchesBack(): void {
 		$this->util->method('getImpersonatorUid')->willReturn('admin');
 		$this->request('GET', '/logout');
+		// Util announces the end itself, for every way an impersonation ends
 		$this->util->expects($this->once())->method('stopImpersonation')->willReturn(true);
 		$this->util->expects($this->never())->method('endImpersonation');
-		$this->expectStopEvent();
+		$this->logger->expects($this->once())->method('warning')->with(
+			$this->stringContains('stopped impersonating'),
+			$this->callback(function (array $context) {
+				return $context['impersonator'] === 'admin' && $context['target'] === 'alice' && $context['remote'] === '10.0.0.1';
+			})
+		);
 		$event = new GenericEvent(null, ['cancel' => false]);
 		$this->listener->onPreLogout($event);
 		$this->assertTrue($event->getArgument('cancel'));
@@ -110,8 +101,7 @@ class LogoutListenerTest extends TestCase {
 		$this->util->method('getImpersonatorUid')->willReturn('admin');
 		$this->request('GET', '/logout');
 		$this->util->expects($this->once())->method('stopImpersonation')->willReturn(false);
-		$this->util->expects($this->once())->method('endImpersonation');
-		$this->expectStopEvent();
+		$this->util->expects($this->once())->method('endImpersonation')->with(Util::REASON_LOGOUT);
 		$event = new GenericEvent(null, ['cancel' => false]);
 		$this->listener->onPreLogout($event);
 		$this->assertFalse($event->getArgument('cancel'));
@@ -133,8 +123,35 @@ class LogoutListenerTest extends TestCase {
 		$this->util->method('getImpersonatorUid')->willReturn('admin');
 		$this->request($method, $path, $csrfOk);
 		$this->util->expects($this->never())->method('stopImpersonation');
+		$this->util->expects($this->once())->method('endImpersonation')->with(Util::REASON_LOGOUT);
+		$event = new GenericEvent(null, ['cancel' => false]);
+		$this->listener->onPreLogout($event);
+		$this->assertFalse($event->getArgument('cancel'));
+	}
+
+	public function testTheRecordedTargetIsLoggedEvenIfTheSessionHasNoUserAnymore(): void {
+		$userSession = $this->createMock(IUserSession::class);
+		$userSession->method('getUser')->willReturn(null);
+		$this->util->method('getImpersonatorUid')->willReturn('admin');
+		$this->util->method('getTargetUid')->willReturn('alice');
+		$this->request('GET', '/apps/files/');
+		$this->logger->expects($this->once())->method('warning')->with(
+			$this->anything(),
+			$this->callback(function (array $context) {
+				return $context['target'] === 'alice';
+			})
+		);
+		$listener = new LogoutListener($this->util, $userSession, $this->request, $this->logger);
+		$listener->onPreLogout(new GenericEvent(null, ['cancel' => false]));
+	}
+
+	public function testALogoutWhosePathCanNotBeDeterminedIsNotASwitchBack(): void {
+		$this->util->method('getImpersonatorUid')->willReturn('admin');
+		$this->request->method('getMethod')->willReturn('GET');
+		$this->request->method('getRawPathInfo')->willThrowException(new \Exception('unknown path'));
+		$this->request->method('passesCSRFCheck')->willReturn(true);
+		$this->util->expects($this->never())->method('stopImpersonation');
 		$this->util->expects($this->once())->method('endImpersonation');
-		$this->expectStopEvent();
 		$event = new GenericEvent(null, ['cancel' => false]);
 		$this->listener->onPreLogout($event);
 		$this->assertFalse($event->getArgument('cancel'));

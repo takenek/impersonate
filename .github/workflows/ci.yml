@@ -2,14 +2,17 @@
 #
 # - read-only token (permissions: contents: read) for every job except "release", no secrets, no
 #   pull_request_target; actions are pinned to full commit SHAs (Dependabot updates them);
+# - every tool comes from a lockfile: composer.lock, vendor-bin/*/composer.lock (QA tools),
+#   package-lock.json (build), tests/ui/package-lock.json (browser test);
 # - every job that needs ownCloud installs the official 11.1.0 QA build (release + tests/ + PHPUnit)
 #   from the owncloud/core GitHub release, verified by its SHA-256 (tests/ci/install-owncloud.sh),
 #   with SQLite, on PHP 8.3 (the only PHP version ownCloud 11.1 runs on);
 # - the throw-away passwords are generated per run and masked;
 # - job "release" (tags v* only, after every other job passed): the tag must be an annotated tag
 #   signed with a key of .github/release-signers as it is on main and name a commit of main, the
-#   versions must match, the archive is built with "make dist", checked against an allow-list,
-#   installed into a fresh ownCloud as README section 2 describes, and published with its SHA-256.
+#   checked-out tree must be that commit, the versions must match, the archive is built with
+#   "make dist", checked against an allow-list, installed into a fresh ownCloud as README section 2
+#   describes, and published with its SHA-256. A published archive is never replaced.
 name: CI
 
 on:
@@ -173,15 +176,21 @@ jobs:
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
           "$RUNNER_TEMP/gitleaks/gitleaks" version
       # A control: a planted private key must be reported with the repository's configuration,
-      # otherwise the scans below prove nothing.
+      # otherwise the scans below prove nothing. Only the expected finding counts: an error of the
+      # tool (which also ends with a non-zero status) is not a detection.
       - name: gitleaks detects a planted secret
         run: |
           mkdir -p "$RUNNER_TEMP/control"
           openssl genpkey -algorithm ed25519 -out "$RUNNER_TEMP/control/id_ed25519" 2>/dev/null
-          if "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config .gitleaks.toml "$RUNNER_TEMP/control"; then
+          rc=0
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir --no-banner --redact --config .gitleaks.toml \
+            --report-format json --report-path "$RUNNER_TEMP/control.json" "$RUNNER_TEMP/control" || rc=$?
+          if [ "$rc" -eq 0 ]; then
             echo "gitleaks did not report the planted key" >&2
             exit 1
           fi
+          jq -e 'type == "array" and any(.[]; .RuleID == "private-key")' "$RUNNER_TEMP/control.json" > /dev/null \
+            || { echo "gitleaks ended with status $rc without reporting the planted key as a private key" >&2; exit 1; }
       - name: Scan the history
         run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact --verbose --config .gitleaks.toml .'
       - name: Scan the tree
@@ -238,8 +247,9 @@ jobs:
         run: tests/e2e/security-checks.sh
       - name: Headless browser test
         run: |
-          npm install --no-save --no-audit --no-fund playwright-core@1.58.2
-          npx --no-install playwright-core install --with-deps chromium
+          # the browser test library with the integrity hash of tests/ui/package-lock.json
+          npm ci --prefix tests/ui --no-audit --no-fund
+          (cd tests/ui && npx --no-install playwright-core install --with-deps chromium)
           SHOTS="$RUNNER_TEMP/screenshots" node tests/ui/ui-impersonate.js
       - name: ownCloud log on failure
         if: failure()
@@ -286,6 +296,12 @@ jobs:
           git -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/release-signers" verify-tag "$TAG"
           git merge-base --is-ancestor "refs/tags/$TAG^{commit}" refs/remotes/origin/main \
             || { echo "$TAG does not name a commit of main" >&2; exit 1; }
+          # what is built below is the tree checked out above: it must be the commit of the verified tag
+          # and the commit this workflow run was started for (which the other jobs tested)
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$TAG^{commit}")" \
+            || { echo "the checked-out commit is not the commit of the verified tag $TAG" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_SHA^{commit}")" \
+            || { echo "the checked-out commit is not the commit this run was started for" >&2; exit 1; }
       - name: The versions match the tag
         env:
           TAG: ${{ github.ref_name }}
@@ -335,7 +351,21 @@ jobs:
           } >> "$RUNNER_TEMP/notes.md"
           files=("build/impersonate-$VERSION.tar.gz" "build/impersonate-$VERSION.tar.gz.sha256")
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --clobber
+            # The release exists (the job was run again): a published file is never replaced. The
+            # build is reproducible, so what is published must be exactly what was built now.
+            published=$(gh release view "$TAG" --json assets --jq '.assets | length')
+            if [ "$published" = 0 ]; then
+              # a release without files: add them (without --clobber an existing file is refused)
+              gh release upload "$TAG" "${files[@]}"
+            else
+              mkdir -p "$RUNNER_TEMP/published"
+              gh release download "$TAG" --dir "$RUNNER_TEMP/published"
+              for file in "${files[@]}"; do
+                cmp "$RUNNER_TEMP/published/$(basename "$file")" "$file" \
+                  || { echo "$(basename "$file") published for $TAG is missing or differs from the file built from the tag" >&2; exit 1; }
+              done
+              echo "the files published for $TAG are the ones built from the tag"
+            fi
           else
             gh release create "$TAG" "${files[@]}" --verify-tag --title "Impersonate $VERSION" \
               --notes-file "$RUNNER_TEMP/notes.md"

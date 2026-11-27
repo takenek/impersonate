@@ -6,11 +6,14 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  * See LICENSE and COPYRIGHT for the license and the AGPL section 7 attribution terms.
  *
- * Headless browser test of the impersonate UI (Playwright): user list column and icons, impersonating
- * by clicking, banner, switching back by logging out, admin settings panel, group admin view.
+ * Headless browser test of the impersonate UI (Playwright): user list column and icons, the
+ * confirmation before an impersonation starts, which account the request names, banner, switching
+ * back by logging out, admin settings panel (the policy is stored by one request), group admin view.
  * Expects the users of tests/e2e/setup-users.sh.
  *
  *   BASE=http://localhost:8080 OC_DIR=... ADMIN_PASSWORD=... USER_PASSWORD=... node tests/ui/ui-impersonate.js
+ *
+ * playwright-core is installed from tests/ui/package-lock.json: npm ci --prefix tests/ui
  *
  * Optional: PHP_AS (run occ as the web server user, e.g. "sudo -u www-data"), CHROME (browser binary),
  * SHOTS (screenshot directory, default ./tests/output/screenshots).
@@ -43,12 +46,28 @@ async function newSession(browser, label) {
   const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
   const page = await context.newPage();
   const errors = [];
+  // requests to the app: [method, path below /apps/impersonate/, body]
+  const requests = [];
+  // set while the test makes a request fail on purpose
+  const expected = { failures: false };
   page.on('pageerror', (e) => errors.push(`[${label}] pageerror: ${e.message}`));
   // "Permissions policy violation: unload" comes from ownCloud core (core/js/js.js registers an unload handler), not from the app
-  page.on('console', (msg) => { if (msg.type() === 'error' && !/Permissions policy violation: unload/.test(msg.text())) errors.push(`[${label}] console.error: ${msg.text()}`); });
+  page.on('console', (msg) => { if (msg.type() === 'error' && !expected.failures && !/Permissions policy violation: unload/.test(msg.text())) errors.push(`[${label}] console.error: ${msg.text()}`); });
   page.on('response', (r) => { if (r.status() >= 500 || (r.url().includes('/apps/impersonate/') && r.status() >= 400 && !r.url().endsWith('/user'))) errors.push(`[${label}] HTTP ${r.status()} ${r.url()}`); });
-  return { context, page, errors };
+  page.on('request', (r) => { const m = /\/apps\/impersonate\/([a-z]+)$/.exec(new URL(r.url()).pathname); if (m && r.method() !== 'GET') requests.push([r.method(), m[1], r.postData() || '']); });
+  return { context, page, errors, requests, expected };
 }
+
+const DIALOG = '.oc-dialog';
+// answer the confirmation dialog of the impersonate icon
+async function answerDialog(page, yes) {
+  await page.waitForSelector(DIALOG, { state: 'visible', timeout: 5000 });
+  const text = (await page.locator(`${DIALOG} .oc-dialog-content`).last().innerText()).trim();
+  await page.locator(`${DIALOG} .oc-dialog-buttonrow button${yes ? '.primary' : ':not(.primary)'}`).last().click();
+  return text;
+}
+
+const appConfig = (key) => occ(`config:app:get impersonate ${key}`).trim();
 
 async function login(page, user, pw) {
   await page.goto(`${BASE}/index.php/login`);
@@ -119,12 +138,49 @@ async function usersPage(page) {
     occ('user:delete neverloggedin');
     await usersPage(a.page);
 
+    console.log('== the icon asks before it switches');
+    await a.page.click('#userlist tr[data-test-uid="alice"] a.impersonate');
+    const question = await answerDialog(a.page, false);
+    check(/"alice"/.test(question), `the confirmation names the account ("${question}")`);
+    await a.page.waitForTimeout(500);
+    check(a.requests.length === 0, 'answering "No" sends no request');
+    check(await currentUser(a.page) === 'admin', 'answering "No" changes nothing');
+    await a.page.screenshot({ path: path.join(SHOTS, '01b-confirmation.png') });
+
+    console.log('== the account is the one the icon was created for, not the text of the row');
+    // an account id that looks like a number, and a row whose visible text names somebody else
+    try { execSync(`${PHP_AS} env OC_PASS=${USER_PW} php ${OC_DIR}/occ user:add --password-from-env 20261127`, { stdio: 'pipe' }); } catch (e) { /* exists */ }
+    const n = await newSession(browser, '20261127');
+    await login(n.page, '20261127', USER_PW);
+    check(await currentUser(n.page) === '20261127', 'the user with a number-like id logged in once');
+    await n.context.close();
+    await usersPage(a.page);
+    await a.page.evaluate(() => {
+      $('#userlist tbody tr').each(function () {
+        if ($(this).data('uid') === '20261127') { $(this).find('.name').text('bob'); }
+      });
+    });
+    await a.page.click('#userlist tr[data-test-uid="20261127"] a.impersonate');
+    const numeric = await answerDialog(a.page, true);
+    check(/"20261127"/.test(numeric), `the confirmation names the account id, not the text of the row ("${numeric}")`);
+    await a.page.waitForURL((u) => !u.pathname.includes('/settings/users'), { timeout: 15000 });
+    await a.page.waitForLoadState('networkidle');
+    check(a.requests.length === 1 && a.requests[0][2] === 'target=20261127', `the request names that account (${JSON.stringify(a.requests)})`);
+    check(await currentUser(a.page) === '20261127', 'now logged in as that account');
+    await logoutViaMenu(a.page);
+    check(await currentUser(a.page) === 'admin', 'after logout back to admin');
+    occ('user:delete 20261127');
+    a.requests.length = 0;
+    await usersPage(a.page);
+
     console.log('== admin impersonates alice via icon');
+    await a.page.click('#userlist tr[data-test-uid="alice"] a.impersonate');
     await Promise.all([
       a.page.waitForURL((u) => !u.pathname.includes('/settings/users'), { timeout: 15000 }),
-      a.page.click('#userlist tr[data-test-uid="alice"] a.impersonate'),
+      answerDialog(a.page, true),
     ]);
     await a.page.waitForLoadState('networkidle');
+    check(a.requests.length === 1 && a.requests[0][0] === 'POST' && a.requests[0][1] === 'user' && a.requests[0][2] === 'target=alice', 'one request, for alice');
     check(await currentUser(a.page) === 'alice', 'now logged in as alice');
     const banner = a.page.locator('#impersonate-notification');
     check(await banner.count() === 1, 'impersonation banner present');
@@ -153,14 +209,52 @@ async function usersPage(page) {
       const visible = await a.page.locator('label[for=impersonateAllGroupAdmins]').isVisible();
       check(visible, 'group-admin radio buttons visible');
       if (visible) {
-        await a.page.click('label[for=impersonateIncludeGroups]');
-        await a.page.waitForTimeout(800);
+        // every change of the panel is one request that carries the whole policy
+        const saved = async (action) => {
+          a.requests.length = 0;
+          const [response] = await Promise.all([
+            a.page.waitForResponse((r) => r.url().endsWith('/apps/impersonate/policy') && r.request().method() === 'PUT', { timeout: 10000 }),
+            action(),
+          ]);
+          await a.page.waitForTimeout(300);
+          return { status: response.status(), sent: a.requests.map((r) => JSON.parse(r[2])), stored: (await response.json()).policy };
+        };
+        let r = await saved(() => a.page.click('label[for=impersonateIncludeGroups]'));
+        check(r.status === 200 && r.sent.length === 1, `"specific groups" is stored by one request (${r.sent.length})`);
+        check(JSON.stringify(r.sent[0]) === '{"mode":"include_groups","groups":[],"allowGroupAdminTargets":false}', `... that carries the whole policy (${JSON.stringify(r.sent[0])})`);
+        check(appConfig('impersonate_include_groups') === 'true' && appConfig('impersonate_all_groupadmins') === 'false' && appConfig('impersonate_include_groups_list') === '[]', '... and the server stored it');
         check(await a.page.locator('#selectIncludedGroups').isVisible(), 'group selector shown for "specific groups"');
         const s2 = await a.page.locator('#selectIncludedGroups .select2-container').count();
         check(s2 === 1, 'select2 group picker initialised');
+        // pick the group g1 in the group picker
+        await a.page.click('#selectIncludedGroups .select2-container');
+        await a.page.waitForSelector('.select2-results li', { timeout: 10000 });
+        r = await saved(() => a.page.locator('.select2-results li', { hasText: /^g1/ }).first().click());
+        check(JSON.stringify(r.sent[0].groups) === '["g1"]' && JSON.stringify(r.stored.groups) === '["g1"]', `a picked group is stored (${JSON.stringify(r.sent)})`);
+        check(appConfig('impersonate_include_groups_list') === '["g1"]', '... on the server');
+        await a.page.keyboard.press('Escape');
         await a.page.screenshot({ path: path.join(SHOTS, '05-admin-settings-groups.png'), fullPage: true });
-        await a.page.click('label[for=impersonateNoGroupAdmins]');
-        await a.page.waitForTimeout(800);
+        r = await saved(() => a.page.click('label[for=impersonateGroupAdminTargets]'));
+        check(r.sent.length === 1 && r.sent[0].allowGroupAdminTargets === true && r.sent[0].mode === 'include_groups' && JSON.stringify(r.sent[0].groups) === '["g1"]', 'the group admin target option is stored together with the rest');
+        check(appConfig('impersonate_allow_groupadmin_targets') === 'true', '... on the server');
+
+        // a request that fails: the panel must not go on showing what was not stored
+        a.expected.failures = true;
+        await a.page.route('**/apps/impersonate/policy', (route) => route.abort());
+        await a.page.click('label[for=impersonateAllGroupAdmins]');
+        await a.page.waitForEvent('load', { timeout: 15000 });
+        await a.page.waitForLoadState('networkidle');
+        await a.page.unroute('**/apps/impersonate/policy');
+        a.expected.failures = false;
+        check(await a.page.isChecked('#impersonateIncludeGroups') && !(await a.page.isChecked('#impersonateAllGroupAdmins')), 'after a failed save the panel shows the policy that is in effect');
+        check(appConfig('impersonate_all_groupadmins') === 'false' && appConfig('impersonate_include_groups') === 'true', '... which the failed save did not change');
+        check(await a.page.getAttribute('#includedGroups', 'data-groups') === '["g1"]', 'the group list comes back as JSON');
+
+        r = await saved(() => a.page.click('label[for=impersonateNoGroupAdmins]'));
+        check(JSON.stringify(r.sent[0]) === '{"mode":"admins","groups":[],"allowGroupAdminTargets":true}', '"only administrators" is stored by one request');
+        r = await saved(() => a.page.click('label[for=impersonateGroupAdminTargets]'));
+        check(appConfig('impersonate_include_groups') === 'false' && appConfig('impersonate_all_groupadmins') === 'false'
+          && appConfig('impersonate_include_groups_list') === '[]' && appConfig('impersonate_allow_groupadmin_targets') === 'false', 'the policy is back to "only administrators"');
       }
     }
     allErrors.push(...a.errors);
@@ -185,6 +279,15 @@ async function usersPage(page) {
     bad('exception: ' + (e.stack || e));
   } finally {
     await browser.close();
+    // whatever happened above: leave the instance as the other tests expect it
+    for (const args of ['user:delete neverloggedin', 'user:delete 20261127',
+      'config:app:set impersonate impersonate_all_groupadmins --value=false',
+      'config:app:set impersonate impersonate_include_groups --value=false',
+      'config:app:set impersonate impersonate_include_groups_list --value=[]',
+      'config:app:set impersonate impersonate_allow_groupadmin_targets --value=false',
+      'impersonate:active --end']) {
+      try { occ(args); } catch (e) { /* nothing to clean up */ }
+    }
   }
   console.log('== browser errors: ' + allErrors.length);
   allErrors.forEach((e) => console.log('  ' + e));

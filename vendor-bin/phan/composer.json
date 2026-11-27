@@ -1,4 +1,9 @@
 {
+    "config": {
+        "platform": {
+            "php": "8.3"
+        }
+    },
     "require": {
         "phan/phan": "^5.4"
     }

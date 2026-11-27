@@ -61,11 +61,37 @@ sql() {
 		echo $r === null ? "" : $r;
 	' "$DB" "$1"
 }
+# sqlx <statement>: change the test database directly (fixtures the web interface can not produce)
+sqlx() {
+	php -r '
+		$db = new SQLite3($argv[1]);
+		$db->busyTimeout(15000);
+		if (!$db->exec($argv[2])) { fwrite(STDERR, "sqlx: statement failed: " . $db->lastErrorMsg() . "\n"); exit(1); }
+	' "$DB" "$1"
+}
 setcfg() { occ config:app:set impersonate "$1" --value="$2" >/dev/null; }
 reset_policy() {
 	setcfg impersonate_all_groupadmins false
 	setcfg impersonate_include_groups false
 	setcfg impersonate_include_groups_list '[]'
+	setcfg impersonate_allow_groupadmin_targets false
+}
+# active_records: number of impersonations the server knows to be active (ActiveImpersonations)
+active_records() { sql "select count(*) from oc_appconfig where appid='impersonate' and configkey like 'active\_%' escape '\'"; }
+# log_count <text>: number of ownCloud log entries of the app whose message contains the text
+log_count() {
+	# shellcheck disable=SC2086
+	$PHP_AS cat "$OC_DIR/data/owncloud.log" 2>/dev/null | php -r '
+		$n = 0;
+		while (($line = fgets(STDIN)) !== false) {
+			$entry = json_decode($line, true);
+			if (is_array($entry) && ($entry["app"] ?? "") === "impersonate" && is_string($entry["message"] ?? null)
+				&& strpos($entry["message"], $argv[1]) !== false) {
+				$n++;
+			}
+		}
+		echo $n;
+	' "$1"
 }
 COOKIE=$(occ config:system:get instanceid)
 
@@ -101,6 +127,8 @@ logout() {
 }
 ocs_admin() { curl -s -u "admin:$ADMIN_PASSWORD" -H 'OCS-APIREQUEST: true' "$@"; }
 sid() { awk -F'\t' -v c="$COOKIE" '$6 == c {print $7}' "$1" | tail -1; }
+# rawsid <jar>: the session id of the jar as the server knows it (not URL encoded)
+rawsid() { php -r 'echo urldecode($argv[1]);' "$(sid "$1")"; }
 # sess <jar>: decrypted session of the jar (passwords masked)
 sess() {
 	local pp
