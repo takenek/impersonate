@@ -5,9 +5,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # See LICENSE and COPYRIGHT for the license and the AGPL section 7 attribution terms.
 #
-# Install a throw-away ownCloud (QA build: release + tests/ + PHPUnit) with SQLite and deploy this app
-# into it. Used by CI (.github/workflows/ci.yml) and for local test runs. The tarball is verified by
-# its SHA-256 (the value published next to the GitHub release asset of owncloud/core).
+# Install a throw-away ownCloud (QA build: release + tests/ + PHPUnit; SQLite by default) and
+# deploy this app into it. Used by CI (.github/workflows/ci.yml) and for local test runs. The tarball
+# is verified by its SHA-256 (the value published next to the GitHub release asset of owncloud/core).
 #
 #   OC_DIR=/tmp/oc ADMIN_PASSWORD=... tests/ci/install-owncloud.sh
 #
@@ -15,6 +15,8 @@
 # (default: 11.1.0), APP_SRC (default: the repository root), APP_ARCHIVE (install this release archive
 # into apps-external instead of the working tree), OC_TARBALL (use a local copy instead of
 # downloading; still verified).
+# Database (default SQLite, as CI uses): OC_DB_TYPE=mysql or pgsql with OC_DB_NAME, OC_DB_USER,
+# OC_DB_PASSWORD and OC_DB_HOST (default localhost); the database must exist and be empty.
 set -euo pipefail
 
 OC_VERSION=${OC_VERSION:-11.1.0}
@@ -59,7 +61,20 @@ else
 fi
 
 occ() { php "$OC_DIR/occ" "$@"; }
-occ maintenance:install --database sqlite --database-name owncloud \
+db=(--database sqlite --database-name owncloud)
+case "${OC_DB_TYPE:-sqlite}" in
+	sqlite) ;;
+	mysql | pgsql)
+		: "${OC_DB_NAME:?set OC_DB_NAME}" "${OC_DB_USER:?set OC_DB_USER}" "${OC_DB_PASSWORD:?set OC_DB_PASSWORD}"
+		db=(--database "$OC_DB_TYPE" --database-name "$OC_DB_NAME" --database-host "${OC_DB_HOST:-localhost}"
+			--database-user "$OC_DB_USER" --database-pass "$OC_DB_PASSWORD")
+		;;
+	*)
+		echo "OC_DB_TYPE must be sqlite, mysql or pgsql" >&2
+		exit 1
+		;;
+esac
+occ maintenance:install "${db[@]}" \
 	--admin-user admin --admin-pass "$ADMIN_PASSWORD" --data-dir "$OC_DIR/data" >/dev/null
 occ config:system:set trusted_domains 0 --value=localhost >/dev/null
 occ config:system:set trusted_domains 1 --value=127.0.0.1 >/dev/null

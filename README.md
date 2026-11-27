@@ -1,7 +1,7 @@
 # Impersonate (`impersonate`) – log in as another user on ownCloud 11
 
 [![CI](https://github.com/takenek/impersonate/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/impersonate/actions/workflows/ci.yml)
-[![Release](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/release-v1.0.2.svg)](https://github.com/takenek/impersonate/releases/latest)
+[![Release](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/release-v1.0.3.svg)](https://github.com/takenek/impersonate/releases/latest)
 [![License](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/license.svg)](LICENSE)
 
 Impersonate lets ownCloud administrators – and, if allowed, group admins – log in as another user
@@ -28,20 +28,22 @@ Documentation: [SECURITY.md](SECURITY.md) · [CHANGELOG.md](CHANGELOG.md) · [CO
 |---|---|
 | ownCloud | 11.x (tested: **11.1.0**) – classic web UI |
 | PHP | **8.3** (ownCloud 11.1 runs only on PHP 8.3) |
-| Database | any database supported by ownCloud (tested with SQLite, the app has no tables) |
+| Database | any database supported by ownCloud; the app has no tables (tested: SQLite, MariaDB 11.8, PostgreSQL 17) |
+| Web server | any setup ownCloud supports (tested: Apache 2.4 with mod_php, nginx 1.26 with PHP-FPM as the ownCloud documentation configures it; CI uses PHP's built-in server) |
+| Languages | the 115 languages and language variants of ownCloud 11.1 (section 6) |
 
 Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.6.x.
 
 ## 2. Installation
 
-1. Download `impersonate-1.0.2.tar.gz` and `impersonate-1.0.2.tar.gz.sha256` from the
+1. Download `impersonate-1.0.3.tar.gz` and `impersonate-1.0.3.tar.gz.sha256` from the
    [latest release](https://github.com/takenek/impersonate/releases/latest) and verify the archive:
 
    ```bash
-   sha256sum -c impersonate-1.0.2.tar.gz.sha256
+   sha256sum -c impersonate-1.0.3.tar.gz.sha256
    ```
 
-   The release archive is built by CI from the signed tag `v1.0.2` (see [SECURITY.md](SECURITY.md),
+   The release archive is built by CI from the signed tag `v1.0.3` (see [SECURITY.md](SECURITY.md),
    "Verifying a release"; the archive contains the SECURITY.md of its version).
 
 2. Extract it into an app directory of your ownCloud (the archive contains the folder
@@ -51,7 +53,7 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
    server's group may only read them. Replace `www-data` by the group of your web server:
 
    ```bash
-   sudo tar -xzf impersonate-1.0.2.tar.gz -C /var/www/owncloud/apps-external
+   sudo tar -xzf impersonate-1.0.3.tar.gz -C /var/www/owncloud/apps-external
    sudo chown -R root:www-data /var/www/owncloud/apps-external/impersonate
    sudo chmod -R u=rwX,g=rX,o= /var/www/owncloud/apps-external/impersonate
    ```
@@ -74,8 +76,8 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
    verified archive:
 
    ```bash
-   mkdir /tmp/impersonate-check && tar -xzf impersonate-1.0.2.tar.gz -C /tmp/impersonate-check
-   sudo diff -r /tmp/impersonate-check/impersonate /var/www/owncloud/apps-external/impersonate && echo unchanged
+   CHECK=$(mktemp -d) && tar -xzf impersonate-1.0.3.tar.gz -C "$CHECK" \
+     && sudo diff -r "$CHECK/impersonate" /var/www/owncloud/apps-external/impersonate && echo unchanged
    ```
 
 4. Enable the app:
@@ -96,11 +98,78 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
 
 ### Upgrade (from 1.0.x or from the ownCloud app 0.x)
 
-Disable nothing: replace the folder `impersonate` by the one from the archive (remove the old folder
-first, set the owner as in step 2), then run `sudo -u www-data php occ upgrade`. The settings are
-kept. Read the "Upgrade notes" of the new version in [CHANGELOG.md](CHANGELOG.md) first: 1.0.1
-changes behaviour (no start through the API, maximum duration, group admins as targets,
-confirmation, background jobs).
+Read the "Upgrade notes" of the versions between yours and the new one in
+[CHANGELOG.md](CHANGELOG.md) first: 1.0.1 changes behaviour (no start through the API, maximum
+duration, group admins as targets, confirmation, background jobs); 1.0.2 and 1.0.3 change neither
+the configuration nor the behaviour. Disable nothing: the settings are kept. Run the commands in one
+shell, in the folder that holds the archive of the new version; replace `/var/www/owncloud` and
+`www-data` by the folder of your ownCloud and the user of your web server.
+
+1. Find the folder of the app and the installed version:
+
+   ```bash
+   OCC="sudo -u www-data php /var/www/owncloud/occ"
+   APPDIR=$($OCC app:getpath impersonate)
+   echo "$APPDIR"                       # e.g. /var/www/owncloud/apps-external/impersonate
+   $OCC app:list impersonate            # Version: 1.0.2
+   ```
+
+2. Download and verify the archive of the new version (section 2, step 1).
+
+3. End the impersonations that are active. While the folder is replaced, ownCloud does not load the
+   app, so an impersonated session would be without its checks for that moment (the app 0.x and
+   1.0.0 have no such command: ask the impersonating administrators to log out instead):
+
+   ```bash
+   $OCC impersonate:active --end
+   ```
+
+4. Replace the folder and keep the old one as a backup outside the app folders of ownCloud (ownCloud
+   must not find two copies of the app). Name the backup after the installed version; it must not
+   exist yet:
+
+   ```bash
+   sudo mv "$APPDIR" /root/impersonate-1.0.2-backup
+   sudo tar -xzf impersonate-1.0.3.tar.gz -C "$(dirname "$APPDIR")"
+   sudo chown -R root:www-data "$APPDIR"
+   sudo chmod -R u=rwX,g=rX,o= "$APPDIR"
+   ```
+
+   If PHP's opcache does not check the time stamps of files (`opcache.validate_timestamps=0`),
+   reload PHP-FPM or Apache now.
+
+5. Run the upgrade and check the result:
+
+   ```bash
+   $OCC upgrade
+   $OCC app:list impersonate            # Version: 1.0.3
+   $OCC impersonate:active              # the command of the app works
+   CHECK=$(mktemp -d) && tar -xzf impersonate-1.0.3.tar.gz -C "$CHECK" \
+     && sudo diff -r "$CHECK/impersonate" "$APPDIR" && echo unchanged
+   ```
+
+   When only the last number of the version changes (1.0.2 to 1.0.3), ownCloud takes the new
+   version over by itself at the next request or `occ` command, so `occ upgrade` may answer
+   "ownCloud is already latest version" (exit status 3): that is fine. A version whose first or
+   second number changes needs `occ upgrade`. Do not switch on the maintenance mode for the upgrade
+   of the app; if it is on, switch it off afterwards with `$OCC maintenance:mode --off`: when only
+   the last number changes, `occ upgrade` in maintenance mode only answers that ownCloud is in
+   maintenance mode (exit status 2, nothing is left to upgrade), and when the first or second number
+   changes it runs but leaves the maintenance mode on.
+
+6. To go back to the backup (only between versions whose first two numbers are the same, e.g. from
+   1.0.3 to 1.0.2):
+
+   ```bash
+   sudo mv "$APPDIR" /root/impersonate-1.0.3-removed
+   sudo mv /root/impersonate-1.0.2-backup "$APPDIR"
+   $OCC upgrade                         # "ownCloud is already latest version"
+   $OCC app:list impersonate            # Version: 1.0.2
+   ```
+
+   `occ app:list` shows the version that ownCloud has registered, which the first `occ` command
+   after the replacement of the folder updates: run `occ upgrade` before it, as in step 5. Remove
+   the backup once the new version works.
 
 ### Uninstall
 
@@ -203,7 +272,9 @@ The tools are installed from lockfiles: `package-lock.json` (build), `vendor-bin
 (PHPStan, Phan, PHP-CS-Fixer, Behat) and `tests/ui/package-lock.json` (browser test).
 
 The tests need an ownCloud 11.1 installation; `tests/ci/install-owncloud.sh` installs a throw-away
-instance (the official QA build, verified by SHA-256) with SQLite and deploys the app:
+instance (the official QA build, verified by SHA-256) with SQLite – or with MySQL/MariaDB or
+PostgreSQL: `OC_DB_TYPE=mysql|pgsql` with `OC_DB_NAME`, `OC_DB_USER`, `OC_DB_PASSWORD`, `OC_DB_HOST`
+and an empty database – and deploys the app:
 
 ```bash
 export OC_DIR=/tmp/oc ADMIN_PASSWORD=$(openssl rand -hex 12) USER_PASSWORD=$(openssl rand -hex 12)
@@ -217,6 +288,12 @@ npm ci --prefix tests/ui && (cd tests/ui && npx playwright-core install chromium
 BASE=http://localhost:8080 node tests/ui/ui-impersonate.js   # headless browser
 BASE=http://localhost:8080 tests/e2e/encryption.sh      # last: enables server-side encryption
 ```
+
+Behind a web server that runs PHP as another user, set `PHP_AS="sudo -u www-data"` and the session
+directory of the web server (`SESSION_DIR`); behind nginx with the error pages of the ownCloud
+configuration set `ERROR_PAGES_REPLACED=1` (the body of a refusal is then the error page that nginx
+serves instead of the app's answer; the status is still checked). `UI_LANGS` (comma-separated locale
+codes) chooses the languages in which the browser test checks the confirmation and the admin section.
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs PHPUnit, PHPStan, Phan, PHP-CS-Fixer,
 a gitleaks secret scan, the HTTP end-to-end and security checks, the Behat API acceptance tests, a
@@ -243,16 +320,29 @@ and builds and publishes the release archive for signed tags.
   change them with `occ config:app:set impersonate impersonate_include_groups_list`.
 * While an impersonation is active, every request to the instance costs one or two additional token
   lookups (the check that the session token of the impersonation is not used elsewhere).
-* The Polish translation is complete. In the other languages the texts that came with 1.0.0, 1.0.1
-  and 1.0.2 (among them the confirmation before an impersonation starts and the notifications about
-  revoked credentials) are not translated yet: they are shown in English.
+* Translations: the user interface is translated into every language of ownCloud 11.1. The Polish
+  translation was reviewed by the maintainer; the others were made with AI assistance (translation,
+  review with a back-translation, adversarial review; CHANGELOG.md, 1.0.3) and have not been
+  reviewed by native speakers yet. If a text reads wrong in your language, please open an issue or
+  correct it ([CONTRIBUTING.md](https://github.com/takenek/impersonate/blob/main/CONTRIBUTING.md)).
+  The reviewers rated their confidence lower where ownCloud itself has few or no translations. A
+  native speaker's review is needed most for Acholi (`ach`), Adyghe (`ady`), Akan (`ak`), Amharic
+  (`am_ET`), Burmese (`my_MM`), Central Atlas Tamazight (`tzm`), Low German (`nds`), Malagasy (`mg`),
+  Maltese (`mt_MT`), N'Ko (`nqo`), Sundanese (`su`) and Tajik (`tg_TJ`): there an additional,
+  independent check of the meaning of every text was made. In these and some other languages
+  ownCloud itself is hardly translated, so the app may be more complete there than ownCloud.
+* In Central Atlas Tamazight (`tzm`) ownCloud 11.1.0's own translations carry a plural rule with an
+  unclosed parenthesis: the browser reports a script error from ownCloud's `core/js/l10n.js` on every
+  page in that language. The translation of the app uses the corrected rule and adds no error.
 
 ## 7. Security review
 
 The code was reviewed with Anthropic's Mythos 5.2 on 2026-11-27 (full source review of the plugin,
 advisory check of its dependencies, remediation of every accepted finding that can be fixed within
 the plugin in release 1.0.1, a verification of these fixes that led to release 1.0.2; see
-[CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md)). The
+[CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md)). Release 1.0.3 adds translations,
+updates the QA tools and fixes how a refusal is shown behind nginx; it does not change what the
+review covered (an independent review of its changes was part of the release). The
 review covered the code of this plugin only: ownCloud itself, other apps and the configuration of
 your instance were not part of it. An automated review is not a certification: report anything it
 missed as described in SECURITY.md.

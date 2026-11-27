@@ -162,8 +162,11 @@
 				OC.redirect(OC.generateUrl(''));
 			}).fail(function(xhr) {
 				var response = (xhr && xhr.responseJSON) || {};
-				if (xhr && xhr.status === 404 && response.error) {
-					// refused by the app: the session was not switched
+				if (xhr && xhr.status === 404) {
+					// Refused: the session was not switched (only a successful start switches it, and
+					// a request that reached no handler switched nothing). The app sends the reason as
+					// JSON; a web server that replaces error pages (nginx with fastcgi_intercept_errors,
+					// as the ownCloud documentation configures it) keeps only the status.
 					pending = false;
 					var message = response.message || t('impersonate', 'Can not impersonate');
 					OC.dialogs.alert(message, t('impersonate', 'Error'));

@@ -7,16 +7,19 @@
  * See LICENSE and COPYRIGHT for the license and the AGPL section 7 attribution terms.
  *
  * Headless browser test of the impersonate UI (Playwright): user list column and icons, the
- * confirmation before an impersonation starts, which account the request names, banner, switching
- * back by logging out, admin settings panel (the policy is stored by one request), group admin view.
- * Expects the users of tests/e2e/setup-users.sh.
+ * confirmation before an impersonation starts, a refused impersonation (also with an error page of
+ * the web server instead of the app's answer), the confirmation and the admin section in several
+ * languages, which account the request names, banner (in the language of the impersonated account),
+ * switching back by logging out, admin settings panel (the policy is stored by one request), group
+ * admin view. Expects the users of tests/e2e/setup-users.sh.
  *
  *   BASE=http://localhost:8080 OC_DIR=... ADMIN_PASSWORD=... USER_PASSWORD=... node tests/ui/ui-impersonate.js
  *
  * playwright-core is installed from tests/ui/package-lock.json: npm ci --prefix tests/ui
  *
  * Optional: PHP_AS (run occ as the web server user, e.g. "sudo -u www-data"), CHROME (browser binary),
- * SHOTS (screenshot directory, default ./tests/output/screenshots).
+ * SHOTS (screenshot directory, default ./tests/output/screenshots), UI_LANGS (comma-separated locale
+ * codes of the language checks; default pl,de_DE,fr,es_419,pt_BR,ru,ar,he,ja,zh-Hans,zh_TW,sr@latin).
  */
 const { chromium } = require('playwright-core');
 const fs = require('fs');
@@ -36,6 +39,9 @@ if (!OC_DIR || !ADMIN_PW || !USER_PW) {
 }
 fs.mkdirSync(SHOTS, { recursive: true });
 const occ = (args) => execSync(`${PHP_AS} php ${OC_DIR}/occ ${args}`, { stdio: 'pipe' }).toString();
+// the translations of the app (l10n/<locale>.json): the texts the language checks expect
+const translations = (lang) => JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'l10n', `${lang}.json`), 'utf8')).translations;
+const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
 let pass = 0, fail = 0;
 const ok = (m) => { pass++; console.log('  PASS: ' + m); };
@@ -117,6 +123,7 @@ async function usersPage(page) {
   const browser = await chromium.launch(CHROME ? { executablePath: CHROME, headless: true } : { headless: true });
   const allErrors = [];
   const adminLang = getLang('admin');
+  const aliceLang = getLang('alice');
   try {
     setLang('admin', 'en');
     console.log('== admin: users page');
@@ -156,21 +163,92 @@ async function usersPage(page) {
     check(a.requests.length === 0, 'answering "No" sends no request');
     check(await currentUser(a.page) === 'admin', 'answering "No" changes nothing');
 
-    console.log('== the confirmation in a language whose translation is complete (Polish)');
-    // a dialog with a translated title and buttons around an English question is not a translation
-    setLang('admin', 'pl');
-    const p = await newSession(browser, 'admin-pl', 'pl-PL');
-    await login(p.page, 'admin', ADMIN_PW);
-    check(await p.page.evaluate(() => document.documentElement.lang.indexOf('pl') === 0), 'the pages of this session are Polish');
-    await usersPage(p.page);
-    await p.page.click('#userlist tr[data-test-uid="alice"] a.impersonate');
-    const polish = await answerDialog(p.page, false, path.join(SHOTS, '01c-confirmation-pl.png'));
-    check(/^Czy chcesz zalogować się jako użytkownik „alice”\?/.test(polish), `the question is asked in Polish and names the account ("${polish}")`);
-    check(!/Do you want|Everything you do|log out/.test(polish), 'no English text is left in it');
-    await p.page.waitForTimeout(500);
-    check(p.requests.length === 0 && await currentUser(p.page) === 'admin', 'answering "Nie" changes nothing');
-    allErrors.push(...p.errors);
-    await p.context.close();
+    console.log('== a refused impersonation says so and keeps the session');
+    // The account is disabled after the page was loaded, so the server refuses (HTTP 404 with the
+    // reason as JSON). A web server that replaces error pages (nginx as the ownCloud documentation
+    // configures it) keeps only the status: then the general text is shown. Either way the answer is
+    // a refusal, not "the result of the request is unknown" with a reload of the page.
+    await usersPage(a.page);
+    occ('user:disable bob');
+    // the browser reports the 404 of the refusal on its console
+    a.expected.failures = true;
+    try {
+      await a.page.click('#userlist tr[data-test-uid="bob"] a.impersonate');
+      await answerDialog(a.page, true);
+      const alertHandle = await a.page.waitForFunction(() => {
+        // the dialogs are position: fixed (no offsetParent); a closed one is display: none
+        const shown = [...document.querySelectorAll('.oc-dialog')].filter((d) => d.getClientRects().length > 0);
+        const last = shown[shown.length - 1];
+        const content = last && last.querySelector('.oc-dialog-content');
+        return content && !/Do you want/.test(content.innerText) ? content.innerText : false;
+      }, null, { timeout: 10000 });
+      const refusal = norm(await alertHandle.jsonValue());
+      check(['Can not impersonate a disabled user', 'Can not impersonate'].includes(refusal), `the refusal is shown ("${refusal}")`);
+      await a.page.locator(`${DIALOG} .oc-dialog-buttonrow button`).last().click();
+      await a.page.waitForTimeout(500);
+      check(a.requests.length === 1 && a.requests[0][2] === 'target=bob', `one request, for bob (${JSON.stringify(a.requests)})`);
+      check(await currentUser(a.page) === 'admin' && new URL(a.page.url()).pathname.includes('/settings/users'), 'the session and the page stay the same');
+    } finally {
+      occ('user:enable bob');
+      a.requests.length = 0;
+    }
+    // the same as nginx answers it: HTTP 404 with an HTML error page instead of the app's JSON
+    await usersPage(a.page);
+    await a.page.route('**/apps/impersonate/user', (route) => route.fulfill({ status: 404, contentType: 'text/html', body: '<!DOCTYPE html><html><body>Not found</body></html>' }));
+    try {
+      await a.page.click('#userlist tr[data-test-uid="carol"] a.impersonate');
+      await answerDialog(a.page, true);
+      const pageHandle = await a.page.waitForFunction(() => {
+        const shown = [...document.querySelectorAll('.oc-dialog')].filter((d) => d.getClientRects().length > 0);
+        const last = shown[shown.length - 1];
+        const content = last && last.querySelector('.oc-dialog-content');
+        return content && !/Do you want/.test(content.innerText) ? content.innerText : false;
+      }, null, { timeout: 10000 });
+      const general = norm(await pageHandle.jsonValue());
+      check(general === 'Can not impersonate', `an error page instead of the reason is shown as a refusal ("${general}")`);
+      await a.page.locator(`${DIALOG} .oc-dialog-buttonrow button`).last().click();
+      await a.page.waitForTimeout(500);
+      check(await currentUser(a.page) === 'admin' && new URL(a.page.url()).pathname.includes('/settings/users'), '... and the session and the page stay the same');
+    } finally {
+      await a.page.unroute('**/apps/impersonate/user');
+      a.expected.failures = false;
+      a.requests.length = 0;
+    }
+
+    console.log('== the confirmation and the admin section in other languages');
+    // Every translation is complete (tests/unit/L10nTest.php): the dialog must show exactly the text
+    // of the language (a translated title and buttons around an English question is not a
+    // translation), the admin section is translated on the server. The languages cover the kinds of
+    // locale codes of ownCloud ("pl", "de_DE", "es_419", "sr@latin", "zh-Hans"), right-to-left
+    // scripts and scripts without spaces. UI_LANGS (comma-separated) replaces the list.
+    const QUESTION = 'Do you want to log in as user "{user}"? Everything you do until you log out is done as this user.';
+    const LANGS = (process.env.UI_LANGS || 'pl,de_DE,fr,es_419,pt_BR,ru,ar,he,ja,zh-Hans,zh_TW,sr@latin').split(',').filter(Boolean);
+    for (const lang of LANGS) {
+      const tr = translations(lang);
+      setLang('admin', lang);
+      // the browser asks for English: the stored language of the user must win
+      const l = await newSession(browser, `admin-${lang}`, 'en-US');
+      await login(l.page, 'admin', ADMIN_PW);
+      const htmlLang = await l.page.evaluate(() => document.documentElement.lang);
+      // ownCloud writes "sr" into the page for sr@latin (lib/private/TemplateLayout.php)
+      check(htmlLang === (lang === 'sr@latin' ? 'sr' : lang), `${lang}: the pages of this session are in that language (${htmlLang})`);
+      await usersPage(l.page);
+      await l.page.click('#userlist tr[data-test-uid="alice"] a.impersonate');
+      await l.page.waitForSelector(DIALOG, { state: 'visible', timeout: 5000 });
+      const title = norm(await l.page.locator(`${DIALOG} .oc-dialog-title`).last().innerText());
+      const shot = path.join(SHOTS, `01c-confirmation-${lang.replace(/[^A-Za-z0-9_-]/g, '_')}.png`);
+      const question = norm(await answerDialog(l.page, false, shot));
+      check(question === norm(tr[QUESTION].replace('{user}', 'alice')), `${lang}: the question is the translation and names the account ("${question}")`);
+      check(title === norm(tr.Impersonate), `${lang}: the title of the dialog is translated ("${title}")`);
+      await l.page.waitForTimeout(500);
+      check(l.requests.length === 0 && await currentUser(l.page) === 'admin', `${lang}: answering "no" changes nothing`);
+      await l.page.goto(`${BASE}/index.php/settings/admin?sectionid=authentication`);
+      await l.page.waitForLoadState('networkidle');
+      const heading = norm(await l.page.locator('#impersonateTemplateSettings h2').innerText());
+      check(heading === norm(tr['Impersonate Settings']), `${lang}: the admin section is translated ("${heading}")`);
+      allErrors.push(...l.errors);
+      await l.context.close();
+    }
     setLang('admin', 'en');
     await usersPage(a.page);
 
@@ -201,6 +279,8 @@ async function usersPage(page) {
     await usersPage(a.page);
 
     console.log('== admin impersonates alice via icon');
+    // the pages of the impersonation are in the language of the account: a right-to-left one here
+    setLang('alice', 'ar');
     await a.page.click('#userlist tr[data-test-uid="alice"] a.impersonate');
     await Promise.all([
       a.page.waitForURL((u) => !u.pathname.includes('/settings/users'), { timeout: 15000 }),
@@ -212,8 +292,9 @@ async function usersPage(page) {
     const banner = a.page.locator('#impersonate-notification');
     check(await banner.count() === 1, 'impersonation banner present');
     if (await banner.count()) {
-      const txt = (await banner.innerText()).trim();
-      check(/alice/.test(txt), `banner text mentions alice ("${txt}")`);
+      const txt = norm(await banner.innerText());
+      const expected = norm(translations('ar')['Logged in as {currentUser}'].replace('{currentUser}', 'alice'));
+      check(txt === expected, `banner text is the translation of the account's language and names alice ("${txt}")`);
       check(await banner.isVisible(), 'banner visible');
     }
     await a.page.screenshot({ path: path.join(SHOTS, '02-impersonating-alice.png') });
@@ -224,6 +305,7 @@ async function usersPage(page) {
     console.log('== logout returns to admin');
     await logoutViaMenu(a.page);
     check(await currentUser(a.page) === 'admin', 'after logout back to admin');
+    setLang('alice', aliceLang);
     await a.page.screenshot({ path: path.join(SHOTS, '03-back-to-admin.png') });
 
     console.log('== admin settings panel');
@@ -316,6 +398,7 @@ async function usersPage(page) {
       try { occ(args); } catch (e) { /* nothing to clean up */ }
     }
     try { setLang('admin', adminLang); } catch (e) { /* it had none and has none */ }
+    try { setLang('alice', aliceLang); } catch (e) { /* it had none and has none */ }
   }
   console.log('== browser errors: ' + allErrors.length);
   allErrors.forEach((e) => console.log('  ' + e));

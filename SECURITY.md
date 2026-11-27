@@ -35,14 +35,14 @@ as the tag, proves nothing.
 
 ```bash
 # the archive matches the checksum published with the release
-sha256sum -c impersonate-1.0.2.tar.gz.sha256
+sha256sum -c impersonate-1.0.3.tar.gz.sha256
 
 # the tag is signed by the release key
 git clone https://github.com/takenek/impersonate.git && cd impersonate
-git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag v1.0.2
+git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag v1.0.3
 
 # the archive can be rebuilt from the tag (reproducible: same content, same checksum)
-git checkout v1.0.2 && make dist && cat build/impersonate-1.0.2.tar.gz.sha256
+git checkout v1.0.3 && make dist && cat build/impersonate-1.0.3.tar.gz.sha256
 ```
 
 CI builds the archive from the commit the verified tag names and never replaces an archive that is
@@ -245,5 +245,11 @@ with URL rewriting and with server-side encryption (master key). The fixes held,
 while an impersonation was active, the check of point 8 changed how requests of everybody else
 were handled (an upload through a public link was refused). 1.0.2 fixes that
 ([CHANGELOG.md](CHANGELOG.md), 1.0.2).
+
+Version 1.0.3 adds translations into every language of ownCloud 11.1, updates the QA tools and fixes
+how a refused impersonation is shown behind nginx (its error pages hide the reason); none of the
+properties above changes. Before the release its changes were reviewed independently, and the
+security checks ran on SQLite with PHP's built-in server, on MariaDB behind Apache with mod_php and
+on PostgreSQL behind nginx with PHP-FPM ([CHANGELOG.md](CHANGELOG.md), 1.0.3).
 
 `tests/e2e/security-checks.sh` checks the properties above on a live instance in CI.

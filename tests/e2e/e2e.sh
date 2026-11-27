@@ -27,7 +27,7 @@ check "$(whoami_ "$A")" alice "session is now alice"
 home=$(curl -s -b "$A" "$BASE/index.php/apps/files/")
 echo "$home" | command grep -q 'impersonate_logout.js' && ok "impersonation banner script loaded" || bad "impersonation banner script NOT loaded"
 code=$(imp "$A" bob); check "$code" 404 "nested impersonation refused"
-command grep -q stopNestedImpersonation "$W/body" && ok "nested -> stopNestedImpersonation" || bad "nested body: $(cat "$W/body")"
+app_body "$W/body" stopNestedImpersonation "nested -> stopNestedImpersonation"
 code=$(logout "$A"); echo "  logout HTTP $code"
 check "$(whoami_ "$A")" admin "logout returned to admin"
 code=$(logout "$A"); echo "  second logout HTTP $code"

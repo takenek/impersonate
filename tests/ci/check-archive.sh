@@ -9,11 +9,11 @@
 # below (one folder "impersonate", required by the ownCloud 11 installer), the compiled templates
 # must be there and the version must be the expected one.
 #
-#   tests/ci/check-archive.sh build/impersonate-1.0.2.tar.gz 1.0.2
+#   tests/ci/check-archive.sh build/impersonate-1.0.3.tar.gz 1.0.3
 set -euo pipefail
 archive=${1:?archive}
 version=${2:?version}
-allowed='^impersonate/((AUTHORS\.md|CHANGELOG\.md|COPYRIGHT|LICENSE|README\.md|SECURITY\.md)|appinfo/(app\.php|info\.xml|register_command\.php|routes\.php)|controller/[a-z]+\.php|css/[a-z-]+\.css|img/[a-z0-9_-]+\.svg|js/[a-z_-]+\.js|js/templates/[A-Za-z]+\.handlebars\.js|l10n/[A-Za-z_@]+\.(js|json)|lib/([A-Za-z]+/)?[A-Za-z]+\.php|templates/[a-z-]+\.php|([A-Za-z0-9_]+/)*)$'
+allowed='^impersonate/((AUTHORS\.md|CHANGELOG\.md|COPYRIGHT|LICENSE|README\.md|SECURITY\.md)|appinfo/(app\.php|info\.xml|register_command\.php|routes\.php)|controller/[a-z]+\.php|css/[a-z-]+\.css|img/[a-z0-9_-]+\.svg|js/[a-z_-]+\.js|js/templates/[A-Za-z]+\.handlebars\.js|l10n/[A-Za-z0-9_@-]+\.(js|json)|lib/([A-Za-z]+/)?[A-Za-z]+\.php|templates/[a-z-]+\.php|([A-Za-z0-9_]+/)*)$'
 bad=0
 while IFS= read -r member; do
 	if ! [[ "$member" =~ $allowed ]]; then
@@ -21,13 +21,16 @@ while IFS= read -r member; do
 		bad=1
 	fi
 done < <(tar -tzf "$archive")
-# README.md refers to SECURITY.md: the archive carries the document of its own version
+# README.md refers to SECURITY.md: the archive carries the document of its own version; the
+# translations include locale codes with digits, "@" and "-" (es_419, sr@latin, zh-Hans)
 for required in impersonate/appinfo/info.xml impersonate/COPYRIGHT impersonate/LICENSE \
 	impersonate/README.md impersonate/SECURITY.md impersonate/appinfo/register_command.php \
 	impersonate/lib/BackgroundJob/Reconcile.php impersonate/lib/Command/Active.php \
 	impersonate/js/templates/addImpersonateIcon.handlebars.js \
 	impersonate/js/templates/removeImpersonateIcon.handlebars.js \
-	impersonate/js/templates/impersonateNotification.handlebars.js; do
+	impersonate/js/templates/impersonateNotification.handlebars.js \
+	impersonate/l10n/pl.js impersonate/l10n/pl.json impersonate/l10n/es_419.js impersonate/l10n/sr@latin.js \
+	impersonate/l10n/zh-Hans.js; do
 	tar -tzf "$archive" "$required" >/dev/null 2>&1 || { echo "missing in the release archive: $required" >&2; bad=1; }
 done
 tar -xzOf "$archive" impersonate/appinfo/info.xml | grep -q "<version>${version}</version>" \

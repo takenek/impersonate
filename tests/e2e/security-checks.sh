@@ -219,7 +219,7 @@ login "$A" admin "$ADMIN_PASSWORD"
 check "$(imp "$A" admin)" 404 "self impersonation refused"
 check "$(imp "$A" ADMIN)" 404 "self impersonation (other case) refused"
 occ user:disable bob >/dev/null
-check "$(imp "$A" bob)" 404 "disabled user refused"; command grep -q userDisabled "$W/body" && ok "error userDisabled" || bad "body $(cat "$W/body")"
+check "$(imp "$A" bob)" 404 "disabled user refused"; app_body "$W/body" userDisabled "error userDisabled"
 occ user:enable bob >/dev/null
 check "$(whoami_ "$A")" admin "admin unaffected"
 
@@ -276,7 +276,7 @@ J=$W/basic
 REFUSALS=$(log_count 'refused: an impersonation must be started from an interactive session')
 code=$(curl -s -o "$W/j" -w '%{http_code}' -c "$J" -u "admin:$ADMIN_PASSWORD" -X POST "$BASE/index.php/apps/impersonate/user" --data-urlencode target=alice)
 check "$code" 404 "start with HTTP Basic credentials refused"
-command grep -q cannotImpersonate "$W/j" && ok "... with the generic error" || bad "body: $(cat "$W/j")"
+app_body "$W/j" cannotImpersonate "... with the generic error"
 [ "$(whoami_ "$J")" != alice ] && ok "the session of the request is not alice" || bad "the HTTP Basic request got a session of alice"
 check "$(curl -s -o /dev/null -w '%{http_code}' -c "$J" -u "admin:$ADMIN_PASSWORD" -H 'OCS-APIREQUEST: true' -X POST "$BASE/index.php/apps/impersonate/user" --data-urlencode target=alice)" 404 "... also as an API request"
 # The platform gives a request with HTTP Basic credentials a session token of its own once it
@@ -372,23 +372,23 @@ occ config:app:delete impersonate forbidden_prefixes >/dev/null
 
 echo "== M. credentials that appear during an impersonation do not outlive it; the owner is told"
 occ app:enable notifications >/dev/null 2>&1
-NOTES=$(sql "select count(*) from oc_notifications where app='impersonate' and user='alice'")
+NOTES=$(sql "select count(*) from oc_notifications where app='impersonate' and \"user\"='alice'")
 mint() { # a passwordless app password, as one created from an impersonated session would be
-	sqlx "insert into oc_authtoken (uid, login_name, password, name, token, type, last_activity, last_check) values ('$1', '$1', NULL, '$2', '$(php -r 'echo hash("sha512", random_bytes(32));')', 1, strftime('%s','now'), strftime('%s','now'))"
+	sqlx "insert into oc_authtoken (uid, login_name, password, name, token, type, last_activity, last_check) values ('$1', '$1', NULL, '$2', '$(php -r 'echo hash("sha512", random_bytes(32));')', 1, $(date +%s), $(date +%s))"
 }
 mint alice e2e-before
 login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" alice)" 200 "admin impersonates alice"
 mint alice e2e-during
 # a session without a stored password, as one that was logged in with the session id of the impersonation
-sqlx "insert into oc_authtoken (uid, login_name, password, name, token, type, last_activity, last_check) values ('alice', 'alice', NULL, 'e2e-derived-session', '$(php -r 'echo hash("sha512", random_bytes(32));')', 0, strftime('%s','now'), strftime('%s','now'))"
+sqlx "insert into oc_authtoken (uid, login_name, password, name, token, type, last_activity, last_check) values ('alice', 'alice', NULL, 'e2e-derived-session', '$(php -r 'echo hash("sha512", random_bytes(32));')', 0, $(date +%s), $(date +%s))"
 occ user:setting alice core signing-key --value=e2e-signing-key >/dev/null
 logout "$A" >/dev/null; check "$(whoami_ "$A")" admin "admin returned"
 check "$(sql "select count(*) from oc_authtoken where name='e2e-during'")" 0 "the app password that appeared during the impersonation is revoked"
 check "$(sql "select count(*) from oc_authtoken where name='e2e-derived-session'")" 0 "a passwordless session that appeared during the impersonation is revoked"
 check "$(sql "select count(*) from oc_authtoken where name='e2e-before'")" 1 "an older one is kept"
 check "$(sql "select count(*) from oc_preferences where userid='alice' and configkey='signing-key'")" 0 "the URL signing key that appeared is removed"
-check "$(( $(sql "select count(*) from oc_notifications where app='impersonate' and user='alice'") - NOTES ))" 3 "alice got a notification for each"
-check "$(sql "select count(*) from oc_notifications where app='impersonate' and user<>'alice'")" 0 "nobody else got one"
+check "$(( $(sql "select count(*) from oc_notifications where app='impersonate' and \"user\"='alice'") - NOTES ))" 3 "alice got a notification for each"
+check "$(sql "select count(*) from oc_notifications where app='impersonate' and \"user\"<>'alice'")" 0 "nobody else got one"
 login "$Bj" alice "$USER_PASSWORD"
 curl -s -b "$Bj" -H 'OCS-APIREQUEST: true' "$BASE/ocs/v2.php/apps/notifications/api/v1/notifications?format=json" > "$W/notifications"
 command grep -q 'e2e-during.* was revoked for security reasons' "$W/notifications" && ok "the notification names the revoked app password" || bad "notification text not found"

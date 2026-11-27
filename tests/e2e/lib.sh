@@ -16,6 +16,12 @@
 #                   (default: none, i.e. the current user owns the instance)
 #   SESSION_DIR     PHP session directory of the web server (default: session.save_path or the temp dir)
 #   CONFIG_DELAY    seconds to wait after "occ config:system:set" (opcache revalidation; default 3)
+#   ERROR_PAGES_REPLACED  1 if the web server replaces the error pages of ownCloud (nginx with
+#                   fastcgi_intercept_errors, as the ownCloud documentation configures it): the body
+#                   of a refusal is then the web server's page, only its status comes from the app
+#
+# The database of the instance is read as config.php describes it (SQLite, MySQL/MariaDB or
+# PostgreSQL; the PHP extension pdo_sqlite, pdo_mysql or pdo_pgsql is needed).
 set -uo pipefail
 
 : "${OC_DIR:?set OC_DIR}"
@@ -25,7 +31,6 @@ BASE=${BASE:-http://localhost:8080}
 PHP_AS=${PHP_AS:-}
 CONFIG_DELAY=${CONFIG_DELAY:-3}
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-DB=$OC_DIR/data/owncloud.db
 if [ -z "${SESSION_DIR:-}" ]; then
 	SESSION_DIR=$(php -r '$p = (string)session_save_path(); $p = substr($p, (int)strrpos(";" . $p, ";")); echo $p !== "" ? $p : sys_get_temp_dir();')
 fi
@@ -51,23 +56,79 @@ occ() {
 	case "${1:-}" in config:system:*) sleep "$CONFIG_DELAY" ;; esac
 	return $rc
 }
-# sql <query>: first column of the first row (waits while the web server holds a write lock)
+# DB_PHP: PHP code that connects $pdo to the database of the instance as config.php describes it
+# (argv[1] = OC_DIR, argv[3] = "ro" for a read-only SQLite connection); sql and sqlx run it as the web
+# server user ($PHP_AS), like occ, because config.php is readable only by that user. Identifiers in
+# double quotes (e.g. "user") and a backslash in a string literal mean the same on all three
+# databases (MySQL: ANSI_QUOTES, NO_BACKSLASH_ESCAPES); a SQLite connection waits up to 15 s while
+# the web server holds a lock.
+DB_PHP='
+	$CONFIG = [];
+	if (!(@include $argv[1] . "/config/config.php") || !isset($CONFIG["dbtype"])) {
+		fwrite(STDERR, "cannot read the database settings in " . $argv[1] . "/config/config.php (PHP_AS?)\n");
+		exit(1);
+	}
+	$type = $CONFIG["dbtype"];
+	// "host", "host:port" or "host:/path/to/socket", as ownCloud reads dbhost
+	$host = (string)($CONFIG["dbhost"] ?? "localhost");
+	$port = null;
+	$socket = null;
+	if (($p = strpos($host, ":", 1)) !== false) {
+		$rest = substr($host, $p + 1);
+		$host = substr($host, 0, $p);
+		if (ctype_digit($rest)) { $port = $rest; } else { $socket = $rest; }
+	}
+	if ($type === "sqlite" || $type === "sqlite3") {
+		$file = rtrim((string)($CONFIG["datadirectory"] ?? $argv[1] . "/data"), "/") . "/" . ($CONFIG["dbname"] ?? "owncloud") . ".db";
+		$opts = [PDO::ATTR_TIMEOUT => 15];
+		if (($argv[3] ?? "") === "ro") { $opts[PDO::SQLITE_ATTR_OPEN_FLAGS] = PDO::SQLITE_OPEN_READONLY; }
+		$pdo = new PDO("sqlite:" . $file, null, null, $opts);
+	} elseif ($type === "mysql") {
+		$pdo = new PDO("mysql:" . ($socket !== null ? "unix_socket=$socket" : "host=$host" . ($port ? ";port=$port" : "")) . ";dbname=" . $CONFIG["dbname"] . ";charset=utf8mb4", $CONFIG["dbuser"], $CONFIG["dbpassword"]);
+		$pdo->exec("SET SESSION sql_mode = CONCAT(@@sql_mode, \",ANSI_QUOTES,NO_BACKSLASH_ESCAPES\")");
+	} elseif ($type === "pgsql") {
+		$pdo = new PDO("pgsql:host=" . ($socket ?? $host) . ($port ? ";port=$port" : "") . ";dbname=" . $CONFIG["dbname"], $CONFIG["dbuser"], $CONFIG["dbpassword"]);
+	} else {
+		fwrite(STDERR, "unsupported database type $type\n");
+		exit(1);
+	}
+	$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+'
+# sql <query>: first column of the first row
 sql() {
-	php -r '
-		$db = new SQLite3($argv[1], SQLITE3_OPEN_READONLY);
-		$db->busyTimeout(15000);
-		$r = $db->querySingle($argv[2]);
-		if ($r === false) { fwrite(STDERR, "sql: query failed: " . $db->lastErrorMsg() . "\n"); exit(1); }
-		echo $r === null ? "" : $r;
-	' "$DB" "$1"
+	# shellcheck disable=SC2016,SC2086
+	$PHP_AS php -r "$DB_PHP"'
+		try {
+			$r = $pdo->query($argv[2])->fetchColumn();
+		} catch (Throwable $e) {
+			fwrite(STDERR, "sql: query failed: " . $e->getMessage() . "\n");
+			exit(1);
+		}
+		echo $r === false || $r === null ? "" : $r;
+	' "$OC_DIR" "$1" ro
 }
 # sqlx <statement>: change the test database directly (fixtures the web interface can not produce)
 sqlx() {
-	php -r '
-		$db = new SQLite3($argv[1]);
-		$db->busyTimeout(15000);
-		if (!$db->exec($argv[2])) { fwrite(STDERR, "sqlx: statement failed: " . $db->lastErrorMsg() . "\n"); exit(1); }
-	' "$DB" "$1"
+	# shellcheck disable=SC2016,SC2086
+	$PHP_AS php -r "$DB_PHP"'
+		try {
+			$pdo->exec($argv[2]);
+		} catch (Throwable $e) {
+			fwrite(STDERR, "sqlx: statement failed: " . $e->getMessage() . "\n");
+			exit(1);
+		}
+	' "$OC_DIR" "$1" rw
+}
+# app_body <file> <text> <what>: the body of a refusal names the reason. With ERROR_PAGES_REPLACED=1
+# an HTML error page of the web server counts as well (the status is checked separately).
+app_body() {
+	if command grep -q -- "$2" "$1"; then
+		ok "$3"
+	elif [ "${ERROR_PAGES_REPLACED:-0}" = 1 ] && command grep -qi '<!DOCTYPE html' "$1"; then
+		ok "$3 (the web server replaced the error page)"
+	else
+		bad "$3: $(head -c 400 "$1")"
+	fi
 }
 setcfg() { occ config:app:set impersonate "$1" --value="$2" >/dev/null; }
 reset_policy() {
@@ -77,7 +138,7 @@ reset_policy() {
 	setcfg impersonate_allow_groupadmin_targets false
 }
 # active_records: number of impersonations the server knows to be active (ActiveImpersonations)
-active_records() { sql "select count(*) from oc_appconfig where appid='impersonate' and configkey like 'active\_%' escape '\'"; }
+active_records() { sql "select count(*) from oc_appconfig where appid='impersonate' and configkey like 'active!_%' escape '!'"; }
 # log_count <text>: number of ownCloud log entries of the app whose message contains the text
 log_count() {
 	# shellcheck disable=SC2086

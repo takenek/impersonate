@@ -1,8 +1,30 @@
 { "translations": {
-    "Impersonate" : "Udgiv",
+    "Can not impersonate. Please contact your server administrator to allow impersonation." : "Kan ikke logge ind som brugeren. Kontakt venligst din serveradministrator for at få tilladelse til at logge ind som andre brugere.",
+    "Can not impersonate" : "Kan ikke logge ind som brugeren",
+    "Unexpected error occurred" : "Der opstod en uventet fejl",
+    "Can not impersonate a disabled user" : "Kan ikke logge ind som en deaktiveret bruger",
+    "Can not impersonate a user who has never logged in" : "Kan ikke logge ind som en bruger, der aldrig har logget ind",
+    "Impersonate" : "Log ind som bruger",
     "Error" : "Fejl",
+    "Do you want to log in as user \"{user}\"? Everything you do until you log out is done as this user." : "Vil du logge ind som brugeren »{user}«? Alt, hvad du gør, indtil du logger ud, bliver udført som denne bruger.",
+    "The result of the request is unknown. The page will be reloaded to show which user you are logged in as." : "Resultatet af forespørgslen er ukendt. Siden bliver genindlæst for at vise, hvilken bruger du er logget ind som.",
     "Logged in as {currentUser}" : "Logget ind som {currentUser}",
-    "Impersonate Settings" : "Udgivelsesindstillinger",
-    "Allow group admins to impersonate users from these groups" : "Tillad gruppeadministratorer at udgive sig for at være brugere fra disse grupper"
+    "The impersonation settings could not be saved. The page will be reloaded to show the settings that are in effect." : "Indstillingerne for login som en anden bruger kunne ikke gemmes. Siden bliver genindlæst for at vise de gældende indstillinger.",
+    "A group whose id contains \"|\" can not be selected here. The page will be reloaded." : "En gruppe, hvis id indeholder tegnet »|«, kan ikke vælges her. Siden bliver genindlæst.",
+    "Impersonate Settings" : "Indstillinger for login som en anden bruger",
+    "The group admin feature of this server is disabled (config.php: 'allow_subadmins' => false), so only administrators can impersonate users. Set 'allow_subadmins' => true to use the group admin options." : "Funktionen til gruppeadministratorer er deaktiveret på denne server (config.php: 'allow_subadmins' => false), så kun administratorer kan logge ind som andre brugere. Angiv 'allow_subadmins' => true for at bruge indstillingerne for gruppeadministratorer.",
+    "Only an administrator is allowed to impersonate users" : "Kun en administrator må logge ind som andre brugere",
+    "Allow all group admins to impersonate users within the groups they are admins of" : "Tillad alle gruppeadministratorer at logge ind som brugere i de grupper, de administrerer",
+    "Allow group admins of specific groups to impersonate the users within those groups" : "Tillad gruppeadministratorer for bestemte grupper at logge ind som brugerne i disse grupper",
+    "Also in the list, but not editable here because their id contains \"|\": %s" : "Grupper, der også er på listen, men ikke kan redigeres her, fordi deres id indeholder tegnet »|«: %s",
+    "Allow group admins to impersonate members who are group admins themselves" : "Tillad gruppeadministratorer at logge ind som medlemmer, der selv er gruppeadministratorer",
+    "Such a member may administer other groups. The impersonating group admin would act with those rights as well." : "Et sådant medlem kan administrere andre grupper. En gruppeadministrator, der logger ind som medlemmet, vil da også have disse rettigheder.",
+    "An impersonation ends after %s minutes at the latest (app config \"max_duration_minutes\")." : "Et login som en anden bruger afsluttes senest efter %s minutter (app-indstillingen »max_duration_minutes«).",
+    "The duration of an impersonation is not limited (app config \"max_duration_minutes\" is 0)." : "Varigheden af et login som en anden bruger er ikke begrænset (app-indstillingen »max_duration_minutes« er 0).",
+    "Refused during an impersonation in addition to the built-in list (app config \"forbidden_prefixes\"): %s" : "Ud over den indbyggede liste afvises forespørgsler til følgende stier under et login som en anden bruger (app-indstillingen »forbidden_prefixes«): %s",
+    "Entries of the app config \"forbidden_prefixes\" that are not a path prefix like \"/apps/someapp/\" and are ignored: %s" : "Følgende poster i app-indstillingen »forbidden_prefixes« er ikke stipræfikser såsom »/apps/someapp/« og ignoreres derfor: %s",
+    "\"%s\" was revoked for security reasons at the end of an impersonation of your account. If you created it yourself, please create it again." : "»%s« blev tilbagekaldt af sikkerhedsgrunde, efter at en anden bruger havde været logget ind som dig. Hvis du selv har oprettet den, så opret den venligst igen.",
+    "The session \"%s\" of your account was ended for security reasons at the end of an impersonation of your account. If it was your own session, please log in again." : "Sessionen »%s« på din konto blev afsluttet af sikkerhedsgrunde, efter at en anden bruger havde været logget ind som dig. Hvis det var din egen session, så log venligst ind igen.",
+    "The URL signing key of your account was removed for security reasons at the end of an impersonation of your account. A new key is created when one is needed." : "URL-signeringsnøglen for din konto blev fjernet af sikkerhedsgrunde, efter at en anden bruger havde været logget ind som dig. Der oprettes en ny nøgle, når der er brug for den."
 },"pluralForm" :"nplurals=2; plural=(n != 1);"
 }

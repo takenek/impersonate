@@ -24,14 +24,16 @@ use Test\TestCase;
  * source text must be "{currentUser}" in every translation, otherwise e.g. the
  * banner does not show whom the session impersonates.
  *
- * A text without a translation is shown in English. In a complete translation
- * (COMPLETE_LOCALES) that must not happen: a dialog would be half translated,
+ * A text without a translation is shown in English. Every translation of the
+ * app is complete, so that must not happen: a dialog would be half translated,
  * e.g. the confirmation that names the account to impersonate.
+ *
+ * The app has a translation for every language ownCloud offers (core/l10n):
+ * ownCloud uses the translation of an app only for exactly the language of the
+ * user; without it the app would appear in the default language of the
+ * instance, in the language of the browser or in English instead.
  */
 class L10nTest extends TestCase {
-	/** locales that have to hold every text of the app, and nothing else */
-	private const COMPLETE_LOCALES = ['pl'];
-
 	private static function appDir(): string {
 		return \dirname(__DIR__, 2);
 	}
@@ -106,8 +108,62 @@ class L10nTest extends TestCase {
 		return $locales;
 	}
 
-	public function testThereAreTranslations(): void {
-		$this->assertGreaterThan(30, \count(self::localeProvider()));
+	/**
+	 * @return array<string, string> locale => plural form of ownCloud core (core/l10n/<locale>.json)
+	 */
+	private static function coreLocales(): array {
+		$locales = [];
+		foreach (\glob(\OC::$SERVERROOT . '/core/l10n/*.json') ?: [] as $file) {
+			$json = \json_decode((string)\file_get_contents($file), true);
+			$locales[\basename($file, '.json')] = \is_array($json) ? (string)($json['pluralForm'] ?? '') : '';
+		}
+		\ksort($locales);
+		return $locales;
+	}
+
+	/**
+	 * Whether ownCloud (core, settings or lib) translates the text into the locale, or into its
+	 * language without the country or script part (es_ES: es), with the same words.
+	 */
+	private static function ownCloudKeepsTheText(string $locale, string $text): bool {
+		$language = (string)\preg_replace('/[_@-].*$/', '', $locale);
+		foreach (\array_unique([$locale, $language]) as $code) {
+			foreach (['core', 'settings', 'lib'] as $part) {
+				$json = \json_decode((string)@\file_get_contents(\OC::$SERVERROOT . "/$part/l10n/$code.json"), true);
+				$translation = \is_array($json) ? ($json['translations'][$text] ?? null) : null;
+				if (\is_array($translation)) {
+					$translation = $translation[0] ?? null;
+				}
+				if ($translation === $text) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	public function testEveryLanguageOfOwnCloudHasATranslation(): void {
+		$core = \array_keys(self::coreLocales());
+		$this->assertGreaterThan(100, \count($core), 'the languages of ownCloud core were not found');
+		$app = \array_keys(self::localeProvider());
+		\sort($app);
+		$this->assertSame([], \array_values(\array_diff($core, $app)), 'languages of ownCloud without a translation of the app');
+		$this->assertSame([], \array_values(\array_diff($app, $core)), 'translations of the app for a language ownCloud does not have');
+	}
+
+	/**
+	 * @dataProvider localeProvider
+	 */
+	public function testThePluralFormIsTheOneOfOwnCloud(string $locale): void {
+		$json = \json_decode((string)\file_get_contents(self::l10nDir() . "/$locale.json"), true);
+		$core = self::coreLocales()[$locale] ?? null;
+		$this->assertIsString($core, "$locale: ownCloud core has no plural form");
+		if (\substr_count($core, '(') === \substr_count($core, ')') + 1 && \substr($core, -1) === ';') {
+			// ownCloud 11.1.0 has an unclosed parenthesis in the form of tzm, which the browser can not
+			// compile (an error on every page): the app closes it
+			$core = \substr($core, 0, -1) . ');';
+		}
+		$this->assertSame($core, $json['pluralForm'] ?? null, "$locale.json: the plural form differs from ownCloud core");
 	}
 
 	public function testTheTextsOfTheAppAreFound(): void {
@@ -140,18 +196,10 @@ class L10nTest extends TestCase {
 		}
 	}
 
-	public static function completeLocaleProvider(): array {
-		$locales = [];
-		foreach (self::COMPLETE_LOCALES as $locale) {
-			$locales[$locale] = [$locale];
-		}
-		return $locales;
-	}
-
 	/**
-	 * @dataProvider completeLocaleProvider
+	 * @dataProvider localeProvider
 	 */
-	public function testACompleteTranslationHoldsEveryTextOfTheApp(string $locale): void {
+	public function testATranslationHoldsEveryTextOfTheApp(string $locale): void {
 		$json = \json_decode((string)\file_get_contents(self::l10nDir() . "/$locale.json"), true);
 		$this->assertIsArray($json['translations'] ?? null);
 		$translations = $json['translations'];
@@ -168,6 +216,11 @@ class L10nTest extends TestCase {
 		);
 		foreach ($translations as $source => $translation) {
 			$this->assertNotSame('', \trim((string)$translation), "$locale.json: empty translation of \"$source\"");
+			// only the English locales keep the source text, and a language in which ownCloud itself
+			// translates the text with the same words (e.g. "Error" in Spanish, also es_ES)
+			if (\strpos($locale, 'en_') !== 0 && (string)$source === (string)$translation) {
+				$this->assertTrue(self::ownCloudKeepsTheText($locale, (string)$source), "$locale.json: \"$source\" is not translated");
+			}
 		}
 	}
 

@@ -6,12 +6,64 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Changed
+## [1.0.3] - 2026-11-27
 
+Translation and maintenance release. The user interface is translated into every language that
+ownCloud 11.1 offers, a refused impersonation is reported correctly behind nginx, and the QA tools
+are up to date. Compared with 1.0.2 nothing changes in the configuration or in the behaviour of an
+impersonation.
+
+Upgrade from 1.0.2 or 1.0.1: replace the app folder (owned by `root`, see README section 2) and run
+`occ upgrade`. From 1.0.0 or 0.x read the upgrade notes of 1.0.1 first (section 1.0.1 of
+CHANGELOG.md, <https://github.com/takenek/impersonate/releases/tag/v1.0.1>): that release changed
+behaviour.
+
+### Added
+- Translations into all 115 languages and language variants of ownCloud 11.1 (up to 1.0.2: Polish
+  complete, 36 languages in part, the others not at all). ownCloud shows an app in the language of
+  the user only if the app has exactly that language; otherwise the app appeared in the default
+  language of the instance (`default_language`), in the language of the browser or in English. The
+  Polish translation is unchanged (reviewed by the maintainer). The other translations were made
+  with AI assistance (Anthropic Claude) in three independent steps per language: a translation that
+  uses the terms and the form of address ownCloud uses in that language, a review with a
+  back-translation into English, and an adversarial review of the result; existing translations were
+  kept where they were right; for the twelve languages in which the reviewers' confidence was low
+  (README section 6) the meaning of every text was checked once more by two independent
+  back-translations. They have not been reviewed by native speakers yet: corrections are welcome
+  ([CONTRIBUTING.md](https://github.com/takenek/impersonate/blob/main/CONTRIBUTING.md)). A unit test
+  requires a complete translation for every language of ownCloud core, with the placeholders of the
+  source text and the plural form of ownCloud.
+
+### Fixed
+- Behind nginx configured as the ownCloud documentation describes it (`fastcgi_intercept_errors`
+  with its own error pages), a refused impersonation said "The result of the request is unknown"
+  and reloaded the page, because nginx replaces the body of the answer (HTTP 404) that carries the
+  reason. Every HTTP 404 answer is now handled as a refusal; without the reason the general text
+  "Can not impersonate" is shown. The session is not switched in either case. Found by a test run
+  on PostgreSQL with nginx and PHP-FPM.
+
+### Changed
 - The occ command `impersonate:active` is registered with `addCommand()` of Symfony Console:
   `add()` is deprecated since Symfony 7.4, which every ownCloud 11 release ships, and Symfony 8
   removes it. If occ does not provide its console application, the error is logged and occ keeps
   working, as before.
+- The record of active impersonations releases a database result only if it is an object (found by
+  PHPStan 2; no change in behaviour).
+- Tests: the browser test checks the confirmation (text and title) and the admin section in several
+  languages, among them right-to-left scripts and the locale codes `es_419`, `sr@latin` and
+  `zh-Hans`, the banner in a right-to-left language (Arabic), and a refused impersonation, also with
+  an error page of the web server instead of the app's answer; the end-to-end checks also run on
+  MySQL/MariaDB and PostgreSQL (`tests/ci/install-owncloud.sh` with `OC_DB_TYPE`); the check of the
+  release archive accepts locale codes with digits and "-". Before the release the tests ran on
+  ownCloud 11.1.0 with PHP 8.3 on SQLite with PHP's built-in web server (as in CI), on MariaDB 11.8
+  with Apache 2.4 and mod_php, and on PostgreSQL 17 with nginx 1.26 and PHP-FPM.
+- README: the upgrade is described step by step as it was tested from the published 1.0.2 archive
+  (ending active impersonations first, the backup, why `occ upgrade` may answer that ownCloud is
+  already up to date, the maintenance mode, going back to the backup).
+- QA tools and test libraries (not part of the release archive): PHPStan 2.3.7 (Dependabot #2), Phan
+  6.0.11 (#3), Mink 1.13.0 and sabre/xml 4.1.0 for the Behat tests (#4, #7), playwright-core 1.65.1
+  for the browser test, which needs Node.js 20 or later (#5). Guzzle stays on 7.x: the test framework
+  of ownCloud 11.1.0 does not work with Guzzle 8 (#6).
 
 ## [1.0.2] - 2026-11-27
 
@@ -374,7 +426,8 @@ owncloud-impersonate (0.0.2)
 owncloud-impersonate (0.0.1)
 * First release
 
-[Unreleased]: https://github.com/takenek/impersonate/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/takenek/impersonate/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/takenek/impersonate/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/takenek/impersonate/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/takenek/impersonate/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/takenek/impersonate/releases/tag/v1.0.0

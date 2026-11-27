@@ -1,11 +1,30 @@
 { "translations": {
-    "Can not impersonate" : "לא ניתן להתחזות",
-    "Unexpected error occured" : "אירעה שגיאה לא צפויה",
-    "Impersonate" : "להתחזות",
+    "Can not impersonate. Please contact your server administrator to allow impersonation." : "לא ניתן להתחבר בתור המשתמש. יש לפנות למנהל השרת שלך בבקשה לאפשר התחברות בתור משתמשים אחרים.",
+    "Can not impersonate" : "לא ניתן להתחבר בתור המשתמש",
+    "Unexpected error occurred" : "אירעה שגיאה בלתי צפויה",
+    "Can not impersonate a disabled user" : "לא ניתן להתחבר בתור משתמש מנוטרל",
+    "Can not impersonate a user who has never logged in" : "לא ניתן להתחבר בתור משתמש שמעולם לא התחבר",
+    "Impersonate" : "התחברות בתור המשתמש",
     "Error" : "שגיאה",
-    "Logged in as {currentUser}" : "נכנסת בתור {currentUser}",
-    "Impersonate Settings" : "הגדרות התחזות",
-    "Allow all group admins to impersonate users within the groups they are admins of" : "מאפשר לכל מנהלי הקבוצות להתחזות לכל משתמש בקבוצה אותם הם מנהלים",
-    "Allow group admins of specific groups to impersonate the users within those groups" : "מאפשר למנהלי קבוצות מסויימות להתחזות לכל משתמש בקבוצה אותם הם מנהלים"
-},"pluralForm" :"nplurals=4; plural=(n == 1 && n % 1 == 0) ? 0 : (n == 2 && n % 1 == 0) ? 1: (n % 10 == 0 && n % 1 == 0 && n > 10) ? 2 : 3;"
+    "Do you want to log in as user \"{user}\"? Everything you do until you log out is done as this user." : "האם ברצונך להתחבר בתור המשתמש „{user}”? כל פעולה שלך עד ההתנתקות תבוצע בתור משתמש זה.",
+    "The result of the request is unknown. The page will be reloaded to show which user you are logged in as." : "תוצאת הבקשה אינה ידועה. העמוד ייטען מחדש כדי להציג את המשתמש המחובר כעת.",
+    "Logged in as {currentUser}" : "התחברת בתור {currentUser}",
+    "The impersonation settings could not be saved. The page will be reloaded to show the settings that are in effect." : "לא ניתן היה לשמור את הגדרות ההתחברות בתור משתמש אחר. העמוד ייטען מחדש כדי להציג את ההגדרות שבתוקף.",
+    "A group whose id contains \"|\" can not be selected here. The page will be reloaded." : "לא ניתן לבחור כאן קבוצה שהמזהה שלה מכיל את התו „|”. העמוד ייטען מחדש.",
+    "Impersonate Settings" : "הגדרות התחברות בתור משתמש אחר",
+    "The group admin feature of this server is disabled (config.php: 'allow_subadmins' => false), so only administrators can impersonate users. Set 'allow_subadmins' => true to use the group admin options." : "תכונת מנהלי הקבוצות מנוטרלת בשרת זה (config.php: 'allow_subadmins' => false), ולכן רק מנהלי מערכת יכולים להתחבר בתור משתמשים אחרים. יש להגדיר 'allow_subadmins' => true כדי להשתמש באפשרויות של מנהלי קבוצות.",
+    "Only an administrator is allowed to impersonate users" : "רק מנהלי מערכת רשאים להתחבר בתור משתמשים",
+    "Allow all group admins to impersonate users within the groups they are admins of" : "לאפשר לכל מנהלי הקבוצות להתחבר בתור משתמשים בקבוצות שהם מנהלים",
+    "Allow group admins of specific groups to impersonate the users within those groups" : "לאפשר למנהלי קבוצות מסוימות להתחבר בתור המשתמשים שבקבוצות אלה",
+    "Also in the list, but not editable here because their id contains \"|\": %s" : "קבוצות שנמצאות גם הן ברשימה, אך לא ניתן לערוך אותן כאן כי המזהה שלהן מכיל את התו „|”: %s",
+    "Allow group admins to impersonate members who are group admins themselves" : "לאפשר למנהלי קבוצות להתחבר בתור חברי קבוצה שהם עצמם מנהלי קבוצות",
+    "Such a member may administer other groups. The impersonating group admin would act with those rights as well." : "חבר כזה עשוי לנהל קבוצות אחרות. מנהל הקבוצה שמתחבר בתור חבר זה יפעל גם עם הרשאות הניהול האלה.",
+    "An impersonation ends after %s minutes at the latest (app config \"max_duration_minutes\")." : "התחברות בתור משתמש אחר מסתיימת לכל המאוחר לאחר %s דקות (הגדרת היישום „max_duration_minutes”).",
+    "The duration of an impersonation is not limited (app config \"max_duration_minutes\" is 0)." : "משך ההתחברות בתור משתמש אחר אינו מוגבל (הערך של הגדרת היישום „max_duration_minutes” הוא 0).",
+    "Refused during an impersonation in addition to the built-in list (app config \"forbidden_prefixes\"): %s" : "בנוסף לרשימה המובנית, כל עוד מחוברים בתור משתמש אחר, נדחות בקשות לנתיבים שמתחילים בקידומות הבאות מהגדרת היישום „forbidden_prefixes”: %s",
+    "Entries of the app config \"forbidden_prefixes\" that are not a path prefix like \"/apps/someapp/\" and are ignored: %s" : "ערכים בהגדרת היישום „forbidden_prefixes” שאינם קידומת נתיב כגון „/apps/someapp/”, ולכן המערכת מתעלמת מהם: %s",
+    "\"%s\" was revoked for security reasons at the end of an impersonation of your account. If you created it yourself, please create it again." : "סיסמת היישום „%s” בוטלה מטעמי אבטחה בתום פרק זמן שבו משתמש אחר היה מחובר לחשבון שלך. אם יצרת אותה בעצמך, יש ליצור אותה מחדש.",
+    "The session \"%s\" of your account was ended for security reasons at the end of an impersonation of your account. If it was your own session, please log in again." : "השיחה „%s” של חשבונך הופסקה מטעמי אבטחה בתום פרק זמן שבו משתמש אחר היה מחובר לחשבון שלך. אם זו הייתה שיחה שלך, יש להתחבר שוב.",
+    "The URL signing key of your account was removed for security reasons at the end of an impersonation of your account. A new key is created when one is needed." : "המפתח לחתימת כתובות URL בחשבונך הוסר מטעמי אבטחה בתום פרק זמן שבו משתמש אחר היה מחובר לחשבון שלך. מפתח חדש ייווצר כשיהיה בו צורך."
+},"pluralForm" :"nplurals=3; plural=(n == 1 && n % 1 == 0) ? 0 : (n == 2 && n % 1 == 0) ? 1: 2;"
 }
