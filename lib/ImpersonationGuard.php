@@ -17,8 +17,10 @@
 
 namespace OCA\Impersonate;
 
+use OCP\IConfig;
 use OCP\ILogger;
 use OCP\IRequest;
+use OCP\ISession;
 use OCP\IUserManager;
 use OCP\IUserSession;
 
@@ -28,7 +30,9 @@ use OCP\IUserSession;
  * session was validated by core, before the request is routed.
  *
  * The checks fail closed: a request whose check can not be completed is
- * refused.
+ * refused - also when the guard itself can not be built (statusWithoutGuard()),
+ * and an impersonation is not started in a request the guard has not seen
+ * (isActiveForThisRequest()).
  *
  * An impersonation is known by two things: the marker in its session and the
  * server side record of its session token (ActiveImpersonations). The platform
@@ -40,12 +44,22 @@ use OCP\IUserSession;
 class ImpersonationGuard {
 	/** the request may continue */
 	public const PROCEED = 0;
-	/** the request is one that is forbidden while impersonating */
+	/** the request is one that is forbidden while impersonating (HTTP 403) */
 	public const FORBIDDEN_REQUEST = 403;
-	/** the impersonation could not be verified */
+	/** the impersonation could not be verified (HTTP 503) */
 	public const UNVERIFIED = 503;
-	/** the session token of an impersonation was presented outside its session */
+	/** the session token of an impersonation was presented outside its session (HTTP 401) */
 	public const TOKEN_MISUSE = 401;
+	/** the impersonation of the session has just been ended by its re-validation (HTTP 401) */
+	public const ENDED = 1;
+
+	/** the HTTP status of each refusal */
+	private const HTTP_STATUS = [
+		self::FORBIDDEN_REQUEST => 403,
+		self::UNVERIFIED => 503,
+		self::TOKEN_MISUSE => 401,
+		self::ENDED => 401,
+	];
 
 	/**
 	 * Requests that would give the impersonator credentials that outlive the
@@ -79,7 +93,10 @@ class ImpersonationGuard {
 		self::FORBIDDEN_REQUEST => 'This action is not allowed while impersonating a user',
 		self::UNVERIFIED => 'The impersonation could not be verified, please retry',
 		self::TOKEN_MISUSE => 'The session of an impersonation can not be used as a credential',
+		self::ENDED => 'The impersonation has ended, please log in again',
 	];
+	/** how much of the request path is written to the log */
+	private const LOGGED_PATH_LENGTH = 1024;
 
 	/** @var Util */
 	private $util;
@@ -122,14 +139,17 @@ class ImpersonationGuard {
 		$this->reconciler = $reconciler;
 	}
 
-	/** @var bool */
+	/** @var bool the hook ran for this request */
 	private static $checked = false;
+	/** @var bool the guard was built and checked this request */
+	private static $active = false;
 
 	/**
 	 * Slot of the 'OC_App::loadedApps' hook (registered in appinfo/app.php): runs
 	 * once per request, after all authentication apps (e.g. LDAP group backends)
 	 * are loaded and core validated the session, before the request is routed.
-	 * The decisions are made in check(); this only wires it to the request.
+	 * The decisions are made in check() and, if the guard can not be built, in
+	 * statusWithoutGuard(); this only wires them to the request.
 	 *
 	 * @codeCoverageIgnore
 	 */
@@ -138,10 +158,16 @@ class ImpersonationGuard {
 			return;
 		}
 		self::$checked = true;
+		if (self::isCommandLine()) {
+			// occ and cron.php on the command line: no HTTP request, no credential and no session of a
+			// browser to check - and nothing here may keep occ (e.g. app:disable) from working
+			return;
+		}
 		try {
 			$application = new AppInfo\Application();
 			/** @var ImpersonationGuard $guard */
 			$guard = $application->getContainer()->query(self::class);
+			self::$active = true;
 			$status = $guard->check();
 		} catch (\Throwable $e) {
 			// the guard itself could not be built
@@ -149,10 +175,68 @@ class ImpersonationGuard {
 				\OC::$server->getLogger()->logException($e, ['app' => 'impersonate']);
 			} catch (\Throwable $ignored) {
 			}
-			$status = self::sessionIsImpersonating() ? self::UNVERIFIED : self::PROCEED;
+			$session = null;
+			$config = null;
+			try {
+				$session = \OC::$server->getSession();
+				$config = \OC::$server->getConfig();
+			} catch (\Throwable $ignored) {
+			}
+			$status = self::statusWithoutGuard($session, $config);
 		}
 		if ($status !== self::PROCEED) {
 			self::refuse($status);
+		}
+	}
+
+	/**
+	 * Is this PHP process a command line one (occ, cron.php run by the system cron)? PHP's
+	 * built-in web server ("cli-server") serves HTTP requests and is no command line.
+	 */
+	public static function isCommandLine(): bool {
+		return \in_array(\PHP_SAPI, ['cli', 'phpdbg'], true);
+	}
+
+	/**
+	 * Was the guard built and did it check this request? An impersonation must not start in a
+	 * request it has not seen (the hook may not have been registered or emitted, or the guard
+	 * could not be built): it would not see the requests of the impersonation either.
+	 */
+	public function isActiveForThisRequest(): bool {
+		return self::$active;
+	}
+
+	/**
+	 * The answer to a request when the guard could not be built. The checks fail closed: the
+	 * request is refused if its session is (or may be) marked as an impersonation, and while an
+	 * impersonation whose session token may still be valid is recorded, or when that can not be
+	 * told - whether the request presents that token can not be checked without the guard
+	 * (endMisusedImpersonations()). This trades availability for completeness: until the cause
+	 * is fixed (see the ownCloud log) or the app is disabled, every request is refused with
+	 * HTTP 503 while such a record exists. A record whose session token is known to be revoked
+	 * or that can not be read names no credential and refuses nothing.
+	 *
+	 * Asked without the services of the app (they are what could not be built).
+	 *
+	 * @param ISession|null $session the session of the request, null if it can not be had
+	 * @param IConfig|null $config null if it can not be had
+	 * @return int self::PROCEED or self::UNVERIFIED
+	 */
+	public static function statusWithoutGuard(?ISession $session, ?IConfig $config): int {
+		try {
+			if ($session === null || $config === null || $session->get(Util::SESSION_IMPERSONATOR) !== null) {
+				return self::UNVERIFIED;
+			}
+			foreach ($config->getAppKeys('impersonate') as $key) {
+				if (\is_string($key) && \strpos($key, ActiveImpersonations::PREFIX) === 0
+					&& ActiveImpersonations::namesCredential(ActiveImpersonations::decode($config->getAppValue('impersonate', $key, '')))
+				) {
+					return self::UNVERIFIED;
+				}
+			}
+			return self::PROCEED;
+		} catch (\Throwable $e) {
+			return self::UNVERIFIED;
 		}
 	}
 
@@ -165,10 +249,15 @@ class ImpersonationGuard {
 	 * - The request is on the deny-list: refused. This does not depend on the
 	 *   re-validation, so a failing backend can not open the deny-list.
 	 * - Otherwise the impersonation is re-validated (and ended if it is not
-	 *   valid anymore, see validate()).
+	 *   valid anymore, see validate()). A request whose impersonation was ended
+	 *   that way is refused, except the logout: what the rest of the request
+	 *   would do must not depend on how the platform reads the identity after the
+	 *   logout.
+	 * - A request of the impersonated session must not present the session token
+	 *   of another impersonation either.
 	 * - Any error on the way: refused.
 	 *
-	 * @return int self::PROCEED, self::FORBIDDEN_REQUEST, self::TOKEN_MISUSE or self::UNVERIFIED
+	 * @return int self::PROCEED, self::FORBIDDEN_REQUEST, self::TOKEN_MISUSE, self::ENDED or self::UNVERIFIED
 	 */
 	public function check(): int {
 		try {
@@ -179,8 +268,10 @@ class ImpersonationGuard {
 				$this->logRefusal();
 				return self::FORBIDDEN_REQUEST;
 			}
-			$this->validate();
-			return self::PROCEED;
+			if (!$this->validate()) {
+				return self::normalizedPath($this->request) === self::LOGOUT_PATH ? self::PROCEED : self::ENDED;
+			}
+			return $this->endMisusedImpersonations($this->util->getRecordId()) ? self::TOKEN_MISUSE : self::PROCEED;
 		} catch (RefusedException $e) {
 			// A request that is not looked at any further (see presentedParameters()): no error of
 			// the app, and nothing an anonymous client should be able to fill the log with.
@@ -190,7 +281,7 @@ class ImpersonationGuard {
 					[
 						'app' => 'impersonate',
 						'method' => $this->request->getMethod(),
-						'path' => self::normalizedPath($this->request),
+						'path' => self::loggablePath($this->request),
 						'remote' => $this->request->getRemoteAddress(),
 						'reason' => $e->getMessage(),
 					]
@@ -217,32 +308,34 @@ class ImpersonationGuard {
 	 * It would act as the impersonated user without any of the checks of this
 	 * class. The impersonation whose token it is, is ended (its token is
 	 * revoked), and the request is refused. The same happens to a session of the
-	 * impersonation that lost its marker.
+	 * impersonation that lost its marker, and to a request of another impersonated
+	 * session ($ownRecordId: its own impersonation is not looked for).
 	 *
-	 * Nothing is looked up unless an impersonation is recorded.
+	 * Nothing is looked up unless an impersonation is recorded whose session token
+	 * may still be valid: a record that only waits for its cleanup after its token
+	 * was revoked names no credential (ActiveImpersonations::namesCredential()).
 	 *
+	 * @param string|null $ownRecordId the record of the impersonation of the session of the request
 	 * @return bool true if the request has to be refused
 	 * @throws \Exception if the tokens can not be looked up
 	 */
-	public function endMisusedImpersonations(): bool {
+	public function endMisusedImpersonations(?string $ownRecordId = null): bool {
 		$records = $this->registry->all();
 		$recordOfToken = [];
+		// how long the ids of the impersonated sessions are (recorded when they started)
+		$lengths = [];
 		foreach ($records as $id => $record) {
-			if ($record !== null) {
+			if ($record !== null && (string)$id !== $ownRecordId && ActiveImpersonations::namesCredential($record)) {
 				$recordOfToken[$record['token']] = (string)$id;
+				if (isset($record['sid'])) {
+					$lengths[$record['sid']] = true;
+				}
 			}
 		}
 		if ($recordOfToken === []) {
 			return false;
 		}
 		$misused = false;
-		// how long the ids of the impersonated sessions are (recorded when they started)
-		$lengths = [];
-		foreach ($records as $record) {
-			if ($record !== null && isset($record['sid'])) {
-				$lengths[$record['sid']] = true;
-			}
-		}
 		$secrets = \array_unique(\array_merge(
 			$this->util->getSessionSecrets(),
 			$this->presentedCredentials(),
@@ -313,12 +406,13 @@ class ImpersonationGuard {
 					|| (\in_array(\strlen($candidate), $lengths, true) && \preg_match('/^[\x21-\x7e]+\z/', $candidate) === 1)
 				) {
 					$candidates[$candidate] = true;
+					// the limit bounds the work, not only the lookups: nothing more is looked at
+					if (\count($candidates) > self::MAX_PARAMETER_CANDIDATES) {
+						throw new RefusedException('too many request values in the shape of a session id while an impersonation is active');
+					}
 				}
 			}
 		});
-		if (\count($candidates) > self::MAX_PARAMETER_CANDIDATES) {
-			throw new RefusedException('too many request values in the shape of a session id while an impersonation is active');
-		}
 		return \array_map('strval', \array_keys($candidates));
 	}
 
@@ -420,10 +514,13 @@ class ImpersonationGuard {
 			}
 			[$scheme, $value] = $parts;
 			if (\strtolower($scheme) === 'basic') {
-				$decoded = \base64_decode($value, true);
-				$colon = \is_string($decoded) ? \strpos($decoded, ':') : false;
-				if ($colon !== false) {
-					$secrets[] = \substr((string)$decoded, $colon + 1);
+				// decoded strictly and as tolerantly as a component that authenticates the request may
+				// decode it (which skips characters that are not Base64): the check sees what it sees
+				foreach ([\base64_decode($value, true), \base64_decode($value)] as $decoded) {
+					$colon = \is_string($decoded) ? \strpos($decoded, ':') : false;
+					if ($colon !== false) {
+						$secrets[] = \substr((string)$decoded, $colon + 1);
+					}
 				}
 			} else {
 				$secrets[] = $value;
@@ -449,16 +546,21 @@ class ImpersonationGuard {
 		if ($impersonatorUid === null) {
 			return true;
 		}
-		if (\OC_User::isIncognitoMode()) {
-			// e.g. an update is pending: core hides the session user, nothing to decide now
-			return true;
-		}
-		$target = $this->userSession->getUser();
 		$targetUid = $this->util->getTargetUid();
 		// the impersonated user for the log: as recorded at the start, else the user of the session
 		$loggedTarget = (string)$targetUid;
 		$reason = null;
-		if ($target === null) {
+		if (\OC_User::isIncognitoMode()) {
+			// Core hides the user of the session (e.g. an update is pending): what can be decided
+			// without the users is still decided.
+			if ($this->util->hasEndedElsewhere()) {
+				$reason = Util::REASON_ENDED_ELSEWHERE;
+			} elseif (!$this->util->isBoundToItsToken()) {
+				$reason = Util::REASON_OTHER_SESSION;
+			} elseif ($this->policy->hasExceededMaxDuration($this->util->getStartTime())) {
+				$reason = 'the maximum duration of the impersonation was reached';
+			}
+		} elseif (($target = $this->userSession->getUser()) === null) {
 			// what is observed, not a guess at the cause (the user may be deleted or its backend unavailable)
 			$reason = 'the session has no user';
 		} elseif ($targetUid !== null && $target->getUID() !== $targetUid) {
@@ -573,8 +675,33 @@ class ImpersonationGuard {
 			$path = (string)\preg_replace('%/{2,}%', '/', $path);
 			$path = \rtrim($path, '/');
 			$paths[] = $path === '' ? '/' : $path;
+			// and with "." and ".." resolved: the compared form must not depend on whether a
+			// component behind the guard resolves them
+			$paths[] = self::withoutDotSegments($path);
 		}
 		return \array_values(\array_unique($paths));
+	}
+
+	private static function withoutDotSegments(string $path): string {
+		$segments = [];
+		foreach (\explode('/', $path) as $segment) {
+			if ($segment === '..') {
+				\array_pop($segments);
+			} elseif ($segment !== '' && $segment !== '.') {
+				$segments[] = $segment;
+			}
+		}
+		return '/' . \implode('/', $segments);
+	}
+
+	/**
+	 * The request path as it is written to the log: URL decoded, so control characters and line
+	 * separators (that would forge log lines) are replaced, and its length is limited.
+	 */
+	private static function loggablePath(IRequest $request): string {
+		$path = \mb_scrub(self::normalizedPath($request), 'UTF-8');
+		$path = (string)\preg_replace('/[\x{00}-\x{1F}\x{7F}-\x{9F}\x{2028}\x{2029}]/u', '?', $path);
+		return \strlen($path) > self::LOGGED_PATH_LENGTH ? \mb_strcut($path, 0, self::LOGGED_PATH_LENGTH, 'UTF-8') . '...' : $path;
 	}
 
 	/**
@@ -607,7 +734,7 @@ class ImpersonationGuard {
 					'target' => $target !== null ? $target->getUID() : (string)$this->util->getTargetUid(),
 					'impersonator' => $this->util->getImpersonatorUid(),
 					'method' => $this->request->getMethod(),
-					'path' => self::normalizedPath($this->request),
+					'path' => self::loggablePath($this->request),
 				]
 			);
 		} catch (\Throwable $e) {
@@ -616,35 +743,43 @@ class ImpersonationGuard {
 	}
 
 	/**
-	 * Is the session of this request marked as an impersonation? Used when the
-	 * guard could not be built; an unreadable session counts as one (refuse).
-	 *
-	 * @codeCoverageIgnore
-	 */
-	private static function sessionIsImpersonating(): bool {
-		try {
-			return \OC::$server->getSession()->get(Util::SESSION_IMPERSONATOR) !== null;
-		} catch (\Throwable $e) {
-			return true;
-		}
-	}
-
-	/**
-	 * Answer the request with the given HTTP status and stop processing it.
+	 * Answer the request with the HTTP status of the refusal and stop processing it.
 	 *
 	 * @codeCoverageIgnore
 	 */
 	private static function refuse(int $status): void {
-		while (\ob_get_level() > 0) {
-			\ob_end_clean();
-		}
-		\http_response_code($status);
+		self::discardOutputBuffers();
+		\http_response_code(self::HTTP_STATUS[$status] ?? 503);
 		\header('Content-Type: application/json; charset=utf-8');
 		\header('Cache-Control: no-store');
+		\header('X-Content-Type-Options: nosniff');
 		if ($status === self::UNVERIFIED) {
 			\header('Retry-After: 5');
 		}
 		echo \json_encode(['message' => self::MESSAGES[$status] ?? 'Refused']);
 		exit();
+	}
+
+	/**
+	 * Drop what was written to the output buffers before the refusal. A buffer that can not be
+	 * removed (opened without the flag that allows it, or the one of zlib.output_compression once
+	 * output went through it) stays and the answer goes through it: the loop ends there instead of
+	 * running until the time limit of the request.
+	 *
+	 * @param callable|null $level for the tests: what ob_get_level() says
+	 * @param callable|null $discard for the tests: ob_end_clean(), true if a buffer was removed
+	 */
+	public static function discardOutputBuffers(?callable $level = null, ?callable $discard = null): void {
+		$level = $level ?? static function (): int {
+			return \ob_get_level();
+		};
+		$discard = $discard ?? static function (): bool {
+			return @\ob_end_clean();
+		};
+		while (($before = $level()) > 0) {
+			if (!$discard() || $level() >= $before) {
+				break;
+			}
+		}
 	}
 }

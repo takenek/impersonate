@@ -46,7 +46,9 @@ class AdminPanel implements ISettings {
 
 	public function getPanel() {
 		$t = new Template('impersonate', 'settings-admin');
-		$t->assign('appEnabled', $this->config->getAppValue('impersonate', 'enabled', 'no') !== 'no');
+		// enabled for everybody: an app that is limited to groups is not loaded for every session,
+		// and impersonations are refused then (SettingsController::impersonate())
+		$t->assign('appEnabled', $this->config->getAppValue('impersonate', 'enabled', 'no') === 'yes');
 		$t->assign('allGroupAdmins', $this->policy->isAllGroupAdminsMode());
 		$t->assign('includeGroups', $this->policy->isIncludeGroupsMode());
 		$t->assign('includedGroups', $this->policy->getIncludedGroups());

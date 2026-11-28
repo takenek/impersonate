@@ -150,4 +150,47 @@ class AuditTrailTest extends TestCase {
 		$this->logger->expects($this->once())->method('logException');
 		$this->auditTrail->credentialRevoked('alice', 'Phone', null);
 	}
+
+	public function testStartAndEndCarryTheIdOfTheImpersonation(): void {
+		// an audit app pairs the start and the end of one impersonation by it
+		$events = [];
+		$dispatcher = $this->createMock(EventDispatcherInterface::class);
+		$dispatcher->method('dispatch')->willReturnCallback(function (GenericEvent $event, $name) use (&$events) {
+			$events[] = [$name, $event->getArguments()];
+			return $event;
+		});
+		$trail = new AuditTrail($dispatcher, $this->createMock(IManager::class), $this->createMock(ILogger::class));
+		$trail->started('admin', 'alice', 'abcdefgh12345678');
+		$trail->ended('admin', 'alice', 'the reason', 'abcdefgh12345678');
+		$trail->ended('admin', 'alice', 'switched by an older version');
+		$this->assertSame([
+			[AuditTrail::EVENT_START, ['impersonator' => 'admin', 'targetUser' => 'alice', 'impersonation' => 'abcdefgh12345678']],
+			[AuditTrail::EVENT_END, ['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => 'the reason', 'impersonation' => 'abcdefgh12345678']],
+			[AuditTrail::EVENT_END, ['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => 'switched by an older version']],
+		], $events);
+	}
+
+	public function testEveryRevokedCredentialGetsANotificationOfItsOwn(): void {
+		// two app passwords with the same name are two notifications for the owner
+		$objects = [];
+		$notification = $this->createMock(INotification::class);
+		foreach (['setApp', 'setUser', 'setDateTime', 'setSubject'] as $setter) {
+			$notification->method($setter)->willReturnSelf();
+		}
+		$notification->method('setObject')->willReturnCallback(function ($type, $id) use (&$objects, $notification) {
+			$objects[] = [$type, $id];
+			return $notification;
+		});
+		$manager = $this->createMock(IManager::class);
+		$manager->method('createNotification')->willReturn($notification);
+		$trail = new AuditTrail($this->createMock(EventDispatcherInterface::class), $manager, $this->createMock(ILogger::class));
+		$trail->credentialRevoked('alice', 'phone', 'admin', Notifier::CREDENTIAL_APP_PASSWORD, 70);
+		$trail->credentialRevoked('alice', 'phone', 'admin', Notifier::CREDENTIAL_APP_PASSWORD, 71);
+		$trail->credentialRevoked('alice', 'phone', 'admin', Notifier::CREDENTIAL_APP_PASSWORD, 70);
+		$this->assertCount(3, $objects);
+		$this->assertSame('credential', $objects[0][0]);
+		$this->assertNotSame($objects[0][1], $objects[1][1]);
+		$this->assertSame($objects[0][1], $objects[2][1], 'the same token is the same object');
+		$this->assertSame(32, \strlen($objects[0][1]));
+	}
 }

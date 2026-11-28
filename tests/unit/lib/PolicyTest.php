@@ -19,9 +19,13 @@ namespace OCA\Impersonate\Tests\Unit\Lib;
 
 use OC\SubAdmin;
 use OCA\Impersonate\Policy;
+use OCP\DB\QueryBuilder\IExpressionBuilder;
+use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IConfig;
+use OCP\IDBConnection;
 use OCP\IGroup;
 use OCP\IGroupManager;
+use OCP\ILogger;
 use OCP\IUser;
 use PHPUnit\Framework\MockObject\MockObject;
 use Test\TestCase;
@@ -133,6 +137,8 @@ class PolicyTest extends TestCase {
 			['"g1"', []],
 			['true', []],
 			['{"a":"g1"}', []],
+			// an object is no list, whatever its keys are
+			['{"0":"g1","1":"g2"}', []],
 			['[["g1"],1,null,"g2"]', ['g2']],
 			['garbage', []],
 			[null, []],
@@ -293,6 +299,11 @@ class PolicyTest extends TestCase {
 			'not a number' => ['unlimited', 3600],
 			'fraction' => ['1.5', 3600],
 			'too long' => ['99999999', 3600],
+			// only exactly "0" removes the limit; white space around a number does not matter otherwise
+			'no limit, with a line break' => ["0\n", 3600],
+			'no limit, written as 00' => ['00', 3600],
+			'configured, with a line break' => ["15\n", 900],
+			'configured, with spaces' => [' 15 ', 900],
 		];
 	}
 
@@ -337,6 +348,9 @@ class PolicyTest extends TestCase {
 			// not a list at all: nothing is used, the whole value is reported
 			['"/apps/tokens/"', [], ['"/apps/tokens/"']],
 			['{"a":"/apps/tokens/"}', [], ['{"a":"/apps/tokens/"}']],
+			// what 1.0.3 refused, 1.0.4 refuses as well: an object with the keys 0, 1, ... is a list here
+			['{"0":"/apps/tokens/","1":"/apps/other/"}', ['/apps/tokens/', '/apps/other/'], []],
+			['{"1":"/apps/tokens/"}', [], ['{"1":"/apps/tokens/"}']],
 			['garbage', [], ['garbage']],
 			['', [], []],
 			['[]', [], []],
@@ -380,7 +394,8 @@ class PolicyTest extends TestCase {
 		$this->assertSame('["g1","g3"]', $this->appConfig['impersonate_include_groups_list']);
 		$this->assertSame('true', $this->appConfig['impersonate_include_groups']);
 		$this->assertSame('false', $this->appConfig['impersonate_all_groupadmins']);
-		$this->assertSame('true', $this->appConfig['impersonate_allow_groupadmin_targets']);
+		// the consent is stored with the delegation it was given for
+		$this->assertSame('{"mode":"include_groups","groups":["g1","g3"]}', $this->appConfig['impersonate_allow_groupadmin_targets']);
 	}
 
 	public function testStoreForgetsTheGroupListInTheOtherModes(): void {
@@ -458,5 +473,223 @@ class PolicyTest extends TestCase {
 		$this->written = [];
 		$policy->forgetGroup('unrelated');
 		$this->assertSame([], $this->written, 'nothing is written for a group that is not listed');
+	}
+
+	public function testTheConsentToGroupAdminsAsTargetsIsBoundToTheDelegation(): void {
+		$policy = $this->policy();
+		$policy->store(Policy::MODE_INCLUDE_GROUPS, ['g1'], true);
+		$this->assertTrue($policy->allowsGroupAdminTargets());
+		// another delegation than the one the consent was given for: it does not apply
+		$this->appConfig['impersonate_include_groups_list'] = '["g1","g2"]';
+		$this->assertFalse($policy->allowsGroupAdminTargets());
+		$this->appConfig['impersonate_include_groups_list'] = '["g1"]';
+		$this->assertTrue($policy->allowsGroupAdminTargets());
+		$this->appConfig['impersonate_all_groupadmins'] = 'true';
+		$this->assertFalse($policy->allowsGroupAdminTargets());
+		$this->assertSame(['mode' => Policy::MODE_ALL_GROUP_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => false], $policy->describe());
+		// "true" (occ, a version before 1.0.4) is a consent without that binding
+		$this->appConfig['impersonate_allow_groupadmin_targets'] = 'true';
+		$this->assertTrue($policy->allowsGroupAdminTargets());
+		foreach (['', 'yes', '{"mode":"all_groupadmins"}', '{"mode":"all_groupadmins","groups":{"a":"g1"}}', '[]', 'null'] as $broken) {
+			$this->appConfig['impersonate_allow_groupadmin_targets'] = $broken;
+			$this->assertFalse($policy->allowsGroupAdminTargets(), $broken);
+		}
+	}
+
+	public function testAConsentGivenForAdministratorsOnlyDoesNotApplyInAnotherMode(): void {
+		// the admin page sends the option with every save; in "administrators only" it has no effect
+		$policy = $this->policy();
+		$this->assertSame(
+			['mode' => Policy::MODE_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => true],
+			$policy->store(Policy::MODE_ADMINS, [], true)
+		);
+		$this->assertSame('{"mode":"admins","groups":[]}', $this->appConfig['impersonate_allow_groupadmin_targets']);
+		// another mode (e.g. set with occ): the consent was not given for it
+		$this->appConfig['impersonate_all_groupadmins'] = 'true';
+		$this->assertFalse($policy->allowsGroupAdminTargets());
+		$this->subAdminOf = ['carol' => ['g1']];
+		$this->memberships = ['carol' => ['g1'], 'erin' => ['g1']];
+		$this->subAdminOf['erin'] = ['g2'];
+		$this->assertSame(Policy::ERROR_ADMIN_TARGET, $policy->check($this->user('carol'), $this->user('erin')));
+	}
+
+	public function testAGroupDeletedWhileTheSaveIsStoredDoesNotStayInTheList(): void {
+		// g3 exists when the request is validated and is deleted before the list is written: the
+		// deletion's cleanup (forgetGroup()) ran before, so the save itself has to drop it
+		$asked = 0;
+		$groupManager = $this->createMock(IGroupManager::class);
+		$groupManager->method('groupExists')->willReturnCallback(function ($gid) use (&$asked) {
+			return $gid === 'g1' || ($gid === 'g3' && $asked++ === 0);
+		});
+		$policy = new Policy($this->config, $groupManager, $this->subAdmin);
+		$stored = $policy->store(Policy::MODE_INCLUDE_GROUPS, ['g1', 'g3'], true);
+		$this->assertSame(['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g1'], 'allowGroupAdminTargets' => true], $stored);
+		$this->assertSame('["g1"]', $this->appConfig['impersonate_include_groups_list']);
+	}
+
+	public function testTheDeletionOfAGroupSwitchesOffTheConsentThatMentionsIt(): void {
+		// switching off can never broaden the delegation, whatever an administrator saved meanwhile
+		$logger = $this->createMock(ILogger::class);
+		$logger->expects($this->once())->method('warning')->with($this->stringContains('was switched off'));
+		$policy = new Policy($this->config, $this->groupManager, $this->subAdmin, null, $logger);
+		$policy->store(Policy::MODE_INCLUDE_GROUPS, ['g1', 'g2'], true);
+		$policy->forgetGroup('g1');
+		$this->assertSame(['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g2'], 'allowGroupAdminTargets' => false], $policy->describe());
+		$this->assertSame('false', $this->appConfig['impersonate_allow_groupadmin_targets']);
+		// a consent that does not mention the group stays
+		$policy->store(Policy::MODE_INCLUDE_GROUPS, ['g2'], true);
+		$policy->forgetGroup('g3');
+		$this->assertTrue($policy->allowsGroupAdminTargets());
+	}
+
+	public function testTheDeletionOfAGroupWorksOnTheValuesAsTheDatabaseHasThemNow(): void {
+		// This request loaded the list [g1,g2,g3] with a consent for it; meanwhile an administrator
+		// saved [g1] without a consent. Deleting g3 must not bring back what was saved over.
+		$this->appConfig['impersonate_include_groups'] = 'true';
+		$this->appConfig['impersonate_include_groups_list'] = '["g1","g2","g3"]';
+		$this->appConfig['impersonate_allow_groupadmin_targets'] = '{"mode":"include_groups","groups":["g1","g2","g3"]}';
+		$rows = [
+			['configkey' => 'impersonate_include_groups', 'configvalue' => 'true'],
+			['configkey' => 'impersonate_include_groups_list', 'configvalue' => '["g1"]'],
+			['configkey' => 'impersonate_allow_groupadmin_targets', 'configvalue' => 'false'],
+		];
+		$query = $this->createMock(IQueryBuilder::class);
+		foreach (['select', 'addSelect', 'from', 'where'] as $method) {
+			$query->method($method)->willReturnSelf();
+		}
+		$query->method('expr')->willReturn($this->createMock(IExpressionBuilder::class));
+		$query->method('execute')->willReturnCallback(function () use ($rows) {
+			return new class($rows) {
+				/** @var array */
+				private $rows;
+
+				public function __construct(array $rows) {
+					$this->rows = $rows;
+				}
+
+				public function fetchAllAssociative(): array {
+					return $this->rows;
+				}
+
+				public function free(): void {
+				}
+			};
+		});
+		$connection = $this->createMock(IDBConnection::class);
+		$connection->method('getQueryBuilder')->willReturn($query);
+		$policy = new Policy($this->config, $this->groupManager, $this->subAdmin, $connection);
+		$this->written = [];
+		$policy->forgetGroup('g3');
+		// the list as the database has it does not contain g3, the consent there is off: nothing to write
+		$this->assertSame([], $this->written);
+		$policy->forgetGroup('g1');
+		$this->assertSame([['impersonate_include_groups_list', '[]']], $this->written);
+	}
+
+	/**
+	 * The writes one store() makes, starting from the given stored values.
+	 *
+	 * @return array[] [key, value]
+	 */
+	private function writesOf(array $start, array $policy): array {
+		$this->appConfig = $start;
+		$this->written = [];
+		$this->policy()->store($policy['mode'], $policy['groups'], $policy['allowGroupAdminTargets']);
+		return $this->written;
+	}
+
+	/**
+	 * @return array{mode: string, groups: string[], allowGroupAdminTargets: bool} what a reader applies
+	 */
+	private function seen(array $values): array {
+		$this->appConfig = $values;
+		return $this->policy()->describe();
+	}
+
+	/**
+	 * May a group admin of $gid impersonate a member of it (who is a group admin or not)?
+	 */
+	private static function permits(array $policy, string $gid, bool $targetIsGroupAdmin): bool {
+		$group = $policy['mode'] === Policy::MODE_ALL_GROUP_ADMINS
+			|| ($policy['mode'] === Policy::MODE_INCLUDE_GROUPS && \in_array($gid, $policy['groups'], true));
+		return $group && (!$targetIsGroupAdmin || $policy['allowGroupAdminTargets']);
+	}
+
+	/**
+	 * Every way to merge two sequences, each one in its own order.
+	 *
+	 * @return \Generator<array>
+	 */
+	private static function interleavings(array $a, array $b): \Generator {
+		if ($a === [] || $b === []) {
+			yield \array_merge($a, $b);
+			return;
+		}
+		foreach (self::interleavings(\array_slice($a, 1), $b) as $rest) {
+			yield \array_merge([$a[0]], $rest);
+		}
+		foreach (self::interleavings($a, \array_slice($b, 1)) as $rest) {
+			yield \array_merge([$b[0]], $rest);
+		}
+	}
+
+	public static function overlappingSavesProvider(): array {
+		$policies = [
+			'admins' => ['mode' => Policy::MODE_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => false],
+			'admins+targets' => ['mode' => Policy::MODE_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => true],
+			'all' => ['mode' => Policy::MODE_ALL_GROUP_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => false],
+			'all+targets' => ['mode' => Policy::MODE_ALL_GROUP_ADMINS, 'groups' => [], 'allowGroupAdminTargets' => true],
+			'g1' => ['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g1'], 'allowGroupAdminTargets' => false],
+			'g2+targets' => ['mode' => Policy::MODE_INCLUDE_GROUPS, 'groups' => ['g2'], 'allowGroupAdminTargets' => true],
+		];
+		$cases = [];
+		foreach ($policies as $fromName => $from) {
+			foreach ($policies as $firstName => $first) {
+				foreach ($policies as $secondName => $second) {
+					if ($firstName < $secondName) {
+						$cases["$fromName, then $firstName and $secondName at once"] = [$from, $first, $second];
+					}
+				}
+			}
+		}
+		return $cases;
+	}
+
+	/**
+	 * Two administrators save different policies at the same moment: whatever order their writes
+	 * reach the database in, what a reader applies is never broader than one of the policies
+	 * (while they are written: than one of them or the one before).
+	 *
+	 * @dataProvider overlappingSavesProvider
+	 */
+	public function testOverlappingSavesNeverLeaveABroaderDelegation(array $from, array $first, array $second): void {
+		$this->writesOf([], $from);
+		$start = $this->appConfig;
+		$this->assertSame($from, $this->seen($start));
+		$writesOfFirst = $this->writesOf($start, $first);
+		$writesOfSecond = $this->writesOf($start, $second);
+		$orders = 0;
+		foreach (self::interleavings($writesOfFirst, $writesOfSecond) as $order) {
+			$orders++;
+			$values = $start;
+			foreach ($order as $step => [$key, $value]) {
+				$values[$key] = $value;
+				$seen = $this->seen($values);
+				$done = $step === \count($order) - 1;
+				foreach ($this->existingGroups as $gid) {
+					foreach ([false, true] as $targetIsGroupAdmin) {
+						$this->assertTrue(
+							!self::permits($seen, $gid, $targetIsGroupAdmin)
+								|| (!$done && self::permits($from, $gid, $targetIsGroupAdmin))
+								|| self::permits($first, $gid, $targetIsGroupAdmin)
+								|| self::permits($second, $gid, $targetIsGroupAdmin),
+							"$gid, group admin as target: " . \var_export($targetIsGroupAdmin, true)
+								. ', seen: ' . \json_encode($seen) . ', values: ' . \json_encode($values)
+						);
+					}
+				}
+			}
+		}
+		$this->assertGreaterThan(1, $orders);
 	}
 }

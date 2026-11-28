@@ -19,7 +19,9 @@ namespace OCA\Impersonate;
 
 use OC\SubAdmin;
 use OCP\IConfig;
+use OCP\IDBConnection;
 use OCP\IGroupManager;
+use OCP\ILogger;
 use OCP\IUser;
 
 /**
@@ -45,6 +47,10 @@ class Policy {
 	/** default of the app config "max_duration_minutes" */
 	public const DEFAULT_MAX_DURATION_MINUTES = 60;
 
+	private const KEY_GROUP_LIST = 'impersonate_include_groups_list';
+	/** "false", "true" (a consent without binding) or the delegation the consent was given for (JSON) */
+	private const KEY_GROUP_ADMIN_TARGETS = 'impersonate_allow_groupadmin_targets';
+
 	/**
 	 * Leading path segments that only select an entry point or an API version:
 	 * the same operation is reached with and without them.
@@ -57,22 +63,36 @@ class Policy {
 	private $groupManager;
 	/** @var SubAdmin */
 	private $subAdmin;
+	/** @var IDBConnection|null for reading values as the database has them now (forgetGroup()) */
+	private $connection;
+	/** @var ILogger|null */
+	private $logger;
 
-	public function __construct(IConfig $config, IGroupManager $groupManager, SubAdmin $subAdmin) {
+	public function __construct(
+		IConfig $config,
+		IGroupManager $groupManager,
+		SubAdmin $subAdmin,
+		?IDBConnection $connection = null,
+		?ILogger $logger = null
+	) {
 		$this->config = $config;
 		$this->groupManager = $groupManager;
 		$this->subAdmin = $subAdmin;
+		$this->connection = $connection;
+		$this->logger = $logger;
 	}
 
 	/**
 	 * ownCloud 11 disables the whole group admin feature unless the system
-	 * config "allow_subadmins" is true. Older versions have no switch.
+	 * config "allow_subadmins" is true. A platform without that switch is not
+	 * one the app supports: then the feature counts as disabled (only
+	 * administrators can impersonate).
 	 */
 	public function isGroupAdminFeatureEnabled(): bool {
 		if (\method_exists($this->subAdmin, 'isEnabled')) {
 			return $this->subAdmin->isEnabled();
 		}
-		return true;
+		return false;
 	}
 
 	public function isAllGroupAdminsMode(): bool {
@@ -91,13 +111,14 @@ class Policy {
 	 */
 	public function getIncludedGroups(): array {
 		return self::decodeGroupList(
-			$this->config->getAppValue(self::APP, 'impersonate_include_groups_list', '[]')
+			$this->config->getAppValue(self::APP, self::KEY_GROUP_LIST, '[]')
 		);
 	}
 
 	/**
 	 * Robustly decode a JSON list of group ids. Anything that is not a JSON
-	 * array of non-empty strings is ignored.
+	 * array of non-empty strings is ignored (a JSON object is no list, whatever
+	 * its keys are).
 	 *
 	 * @param mixed $raw
 	 * @return string[]
@@ -106,8 +127,9 @@ class Policy {
 		if (!\is_string($raw) || $raw === '') {
 			return [];
 		}
-		$decoded = \json_decode($raw, true);
-		if (!\is_array($decoded) || !\array_is_list($decoded)) {
+		// objects stay objects: only a JSON array becomes a PHP array
+		$decoded = \json_decode($raw);
+		if (!\is_array($decoded)) {
 			return [];
 		}
 		$groups = [];
@@ -123,9 +145,65 @@ class Policy {
 	 * May group admins impersonate members who are group admins themselves?
 	 * Off by default: such a member can act on groups that were not delegated to
 	 * the impersonator.
+	 *
+	 * The admin page stores this consent together with the mode and the groups
+	 * it was given for (store()): it only applies while exactly that delegation
+	 * is stored. The four values of the policy are written one after the other,
+	 * so two saves that overlap could otherwise leave the mode of one with the
+	 * consent of the other - a delegation broader than either administrator
+	 * approved. The value "true" (set with occ, or by a version before 1.0.4)
+	 * is a consent without that binding.
 	 */
 	public function allowsGroupAdminTargets(): bool {
-		return $this->config->getAppValue(self::APP, 'impersonate_allow_groupadmin_targets', 'false') === 'true';
+		$raw = $this->config->getAppValue(self::APP, self::KEY_GROUP_ADMIN_TARGETS, 'false');
+		if ($raw === 'true') {
+			return true;
+		}
+		$binding = self::decodeTargetsBinding($raw);
+		if ($binding === null) {
+			return false;
+		}
+		$mode = $this->mode();
+		return $binding['mode'] === $mode
+			&& self::sameGroups($binding['groups'], $mode === self::MODE_INCLUDE_GROUPS ? $this->getIncludedGroups() : []);
+	}
+
+	/**
+	 * @param mixed $raw
+	 * @return array{mode: string, groups: string[]}|null the delegation a stored consent was given for
+	 */
+	private static function decodeTargetsBinding($raw): ?array {
+		$decoded = \is_string($raw) && $raw !== '' ? \json_decode($raw, true) : null;
+		if (!\is_array($decoded) || !\is_string($decoded['mode'] ?? null) || !\is_array($decoded['groups'] ?? null)
+			|| !\array_is_list($decoded['groups'])
+		) {
+			return null;
+		}
+		foreach ($decoded['groups'] as $gid) {
+			if (!\is_string($gid)) {
+				return null;
+			}
+		}
+		return ['mode' => $decoded['mode'], 'groups' => $decoded['groups']];
+	}
+
+	/**
+	 * @param string[] $a
+	 * @param string[] $b
+	 */
+	private static function sameGroups(array $a, array $b): bool {
+		$a = \array_values(\array_unique($a));
+		$b = \array_values(\array_unique($b));
+		\sort($a, SORT_STRING);
+		\sort($b, SORT_STRING);
+		return $a === $b;
+	}
+
+	/**
+	 * @param string[] $groups
+	 */
+	private static function targetsBinding(string $mode, array $groups): string {
+		return \json_encode(['mode' => $mode, 'groups' => \array_values($groups)], JSON_THROW_ON_ERROR);
 	}
 
 	/**
@@ -143,13 +221,19 @@ class Policy {
 
 	/**
 	 * Maximum duration of an impersonation in seconds, 0 = no limit. App config
-	 * "max_duration_minutes" (default 60); anything that is not a non-negative
-	 * integer counts as the default, so a broken value never removes the limit.
+	 * "max_duration_minutes" (default 60): a positive whole number of minutes
+	 * (white space around it does not matter); only exactly "0" removes the limit;
+	 * anything else counts as the default, so a broken value never removes the
+	 * limit (and a number with a line break after it is not made longer).
 	 */
 	public function getMaxDuration(): int {
 		$raw = $this->config->getAppValue(self::APP, 'max_duration_minutes', (string)self::DEFAULT_MAX_DURATION_MINUTES);
-		$minutes = \is_string($raw) && \preg_match('/^\d{1,6}$/', $raw) === 1
-			? (int)$raw
+		if ($raw === '0') {
+			return 0;
+		}
+		$value = \is_string($raw) ? \trim($raw) : '';
+		$minutes = \preg_match('/^\d{1,6}\z/', $value) === 1 && (int)$value > 0
+			? (int)$value
 			: self::DEFAULT_MAX_DURATION_MINUTES;
 		return 60 * $minutes;
 	}
@@ -193,6 +277,9 @@ class Policy {
 	 */
 	private function readForbiddenPrefixes(): array {
 		$raw = $this->config->getAppValue(self::APP, 'forbidden_prefixes', '[]');
+		// A JSON object whose keys are 0, 1, 2, ... is taken as the list it describes: what was
+		// refused up to now is refused after an update as well (unlike the group list, where a
+		// value that is not a JSON array delegates nothing).
 		$decoded = \is_string($raw) ? \json_decode($raw === '' ? '[]' : $raw, true) : null;
 		if (!\is_array($decoded) || !\array_is_list($decoded)) {
 			return [[], [\is_string($raw) ? $raw : '']];
@@ -323,13 +410,7 @@ class Policy {
 	 * @return array{mode: string, groups: string[], allowGroupAdminTargets: bool}
 	 */
 	public function describe(): array {
-		if ($this->isAllGroupAdminsMode()) {
-			$mode = self::MODE_ALL_GROUP_ADMINS;
-		} elseif ($this->isIncludeGroupsMode()) {
-			$mode = self::MODE_INCLUDE_GROUPS;
-		} else {
-			$mode = self::MODE_ADMINS;
-		}
+		$mode = $this->mode();
 		return [
 			'mode' => $mode,
 			'groups' => $mode === self::MODE_INCLUDE_GROUPS ? $this->getIncludedGroups() : [],
@@ -340,7 +421,12 @@ class Policy {
 	/**
 	 * Validate and store the whole delegation policy. Only existing groups are
 	 * kept. The values are written in an order in which a failure in between
-	 * never leaves a broader delegation than the previous or the requested one.
+	 * never leaves a broader delegation than the previous or the requested one;
+	 * the consent to group admins as targets is bound to the delegation it is
+	 * given for (allowsGroupAdminTargets()), so that two saves that overlap
+	 * never leave a delegation broader than one of them. A consent given in
+	 * the mode "administrators only" (where group admins impersonate nobody)
+	 * does not apply in the mode chosen later.
 	 *
 	 * @param mixed[] $groups
 	 * @return array{mode: string, groups: string[], allowGroupAdminTargets: bool} the stored policy
@@ -358,32 +444,86 @@ class Policy {
 				}
 			}
 		}
-		if (!$allowGroupAdminTargets) {
+		$targets = $allowGroupAdminTargets;
+		if (!$targets) {
 			// narrowing first
-			$this->config->setAppValue(self::APP, 'impersonate_allow_groupadmin_targets', 'false');
+			$this->config->setAppValue(self::APP, self::KEY_GROUP_ADMIN_TARGETS, 'false');
 		}
 		$this->config->setAppValue(self::APP, 'impersonate_all_groupadmins', $mode === self::MODE_ALL_GROUP_ADMINS ? 'true' : 'false');
-		$this->config->setAppValue(self::APP, 'impersonate_include_groups_list', (string)\json_encode($valid));
+		$this->config->setAppValue(self::APP, self::KEY_GROUP_LIST, (string)\json_encode($valid));
 		$this->config->setAppValue(self::APP, 'impersonate_include_groups', $mode === self::MODE_INCLUDE_GROUPS ? 'true' : 'false');
-		if ($allowGroupAdminTargets) {
-			$this->config->setAppValue(self::APP, 'impersonate_allow_groupadmin_targets', 'true');
+		if ($targets) {
+			$this->config->setAppValue(self::APP, self::KEY_GROUP_ADMIN_TARGETS, self::targetsBinding($mode, $valid));
+		}
+		// A group deleted while this was stored must not stay in the list (forgetGroup() may have
+		// run before the list above was written): a group created later under the same id would
+		// inherit the delegation. As far as this process can tell: the group manager may answer
+		// from what it loaded for this request.
+		$existing = \array_values(\array_filter($valid, function (string $gid): bool {
+			return $this->groupManager->groupExists($gid);
+		}));
+		if ($existing !== $valid) {
+			$this->config->setAppValue(self::APP, self::KEY_GROUP_LIST, (string)\json_encode($existing));
+			if ($targets) {
+				$this->config->setAppValue(self::APP, self::KEY_GROUP_ADMIN_TARGETS, self::targetsBinding($mode, $existing));
+			}
 		}
 		return $this->describe();
 	}
 
 	/**
 	 * A group was deleted: its id must not stay in the delegation list, a group
-	 * created later under the same id would inherit the delegation.
+	 * created later under the same id would inherit the delegation. The values
+	 * are read as the database has them now, not as this request loaded them (an
+	 * administrator may have saved the policy meanwhile). A consent to group
+	 * admins as targets that was given for a list with the group is switched off
+	 * (switching off can never broaden the delegation, whatever was saved in
+	 * between); the administrator saves the policy again to keep it.
 	 */
 	public function forgetGroup(string $gid): void {
-		$groups = $this->getIncludedGroups();
+		$groups = self::decodeGroupList($this->currentValue(self::KEY_GROUP_LIST, '[]'));
 		if (\in_array($gid, $groups, true)) {
 			$this->config->setAppValue(
 				self::APP,
-				'impersonate_include_groups_list',
+				self::KEY_GROUP_LIST,
 				(string)\json_encode(\array_values(\array_diff($groups, [$gid])))
 			);
 		}
+		$binding = self::decodeTargetsBinding($this->currentValue(self::KEY_GROUP_ADMIN_TARGETS, 'false'));
+		if ($binding !== null && \in_array($gid, $binding['groups'], true)) {
+			$this->config->setAppValue(self::APP, self::KEY_GROUP_ADMIN_TARGETS, 'false');
+			if ($this->logger !== null) {
+				$this->logger->warning(
+					'The option to let group admins impersonate members who are group admins themselves was switched off: it was given for the deleted group "{group}". Save the impersonation policy again to keep it.',
+					['app' => self::APP, 'group' => $gid]
+				);
+			}
+		}
+	}
+
+	/**
+	 * A value of the app as the database has it now (as this request loaded it if there is no
+	 * database connection, e.g. in unit tests).
+	 */
+	private function currentValue(string $key, string $default): string {
+		if ($this->connection === null) {
+			return (string)$this->config->getAppValue(self::APP, $key, $default);
+		}
+		$value = ActiveImpersonations::freshAppValues($this->connection)[$key] ?? null;
+		return \is_string($value) ? $value : $default;
+	}
+
+	/**
+	 * @return string self::MODE_* as the stored values say it
+	 */
+	private function mode(): string {
+		if ($this->isAllGroupAdminsMode()) {
+			return self::MODE_ALL_GROUP_ADMINS;
+		}
+		if ($this->isIncludeGroupsMode()) {
+			return self::MODE_INCLUDE_GROUPS;
+		}
+		return self::MODE_ADMINS;
 	}
 
 	/**

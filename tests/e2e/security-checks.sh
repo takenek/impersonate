@@ -12,7 +12,8 @@
 # starts without an interactive session, concurrent requests during the switch, the credential
 # cleanup and its notification, impersonations that end without a logout (reconcile job, occ),
 # the session token of an impersonation used outside its session, requests of other users while
-# somebody is impersonated.
+# somebody is impersonated, the maintenance window of occ impersonate:active (--block, exit
+# status), an app that is not enabled for everybody.
 # Expects the users of setup-users.sh. Environment: see lib.sh. Uses only throw-away rv* accounts
 # and e2e-* fixtures.
 . "$(dirname "$0")/lib.sh"
@@ -26,6 +27,9 @@ restore() {
 	occ config:app:delete impersonate max_duration_minutes >/dev/null 2>&1
 	occ config:app:delete impersonate forbidden_prefixes >/dev/null 2>&1
 	occ config:app:delete impersonate allow_start_with_credentials >/dev/null 2>&1
+	occ config:app:delete impersonate starts_blocked >/dev/null 2>&1
+	occ config:app:delete impersonate active_e2epending000000 >/dev/null 2>&1
+	occ config:app:set impersonate enabled --value=yes >/dev/null 2>&1
 	occ config:system:set allow_subadmins --value=true --type=boolean >/dev/null
 	ocs_admin -X DELETE "$BASE/ocs/v1.php/cloud/users/alice/subadmins" -d groupid=g2 >/dev/null 2>&1
 	# the folder of section Q (its public link goes with it)
@@ -198,6 +202,25 @@ check "$(active_records)" 0 "its record is closed"
 check "$(( $(log_count 'the maximum duration of the impersonation was reached') - LOGGED ))" 1 "the reason is logged"
 occ config:app:delete impersonate max_duration_minutes >/dev/null
 
+echo "== C2b. a request whose impersonation the check has just ended is refused (not the logout)"
+setcfg impersonate_all_groupadmins true
+login "$C" carol "$USER_PASSWORD"; check "$(imp "$C" alice)" 200 "carol impersonates alice"
+occ user:disable carol >/dev/null
+check "$(curl -s -D "$W/ended-headers" -o "$W/ended" -w '%{http_code}' -b "$C" -c "$C" "$BASE/index.php/apps/files/")" 401 "impersonator disabled -> the page is not served"
+app_body "$W/ended" 'The impersonation has ended' "... the answer says why"
+command grep -qi '^X-Content-Type-Options: nosniff' "$W/ended-headers" && ok "... with X-Content-Type-Options: nosniff" || bad "the refusal has no X-Content-Type-Options header"
+command grep -qi '^Cache-Control: no-store' "$W/ended-headers" && ok "... and Cache-Control: no-store" || bad "the refusal can be cached"
+check "$(whoami_ "$C")" anonymous "... and the session has ended"
+occ user:enable carol >/dev/null
+login "$C" carol "$USER_PASSWORD"; check "$(imp "$C" alice)" 200 "carol impersonates alice again"
+occ user:disable carol >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$C" -c "$C" "$BASE/index.php/logout")
+case "$code" in 302|303) ok "the logout itself goes on ($code)" ;; *) bad "GET /logout after the end -> $code" ;; esac
+check "$(whoami_ "$C")" anonymous "... into a logged out session"
+occ user:enable carol >/dev/null
+check "$(active_records)" 0 "no impersonation is left"
+setcfg impersonate_all_groupadmins false
+
 echo "== C3. no login inside an impersonated session"
 # The login form accepts the id of a session as the password of its user: from inside the
 # impersonated session it would turn the session into a new one that nothing knows about (and a
@@ -213,6 +236,21 @@ check "$(whoami_ "$A")" alice "the impersonation goes on"
 logout "$A" >/dev/null; check "$(whoami_ "$A")" admin "... and ends as usual"
 check "$(sql "select count(*) from oc_authtoken where id>$MARK and name like 'Impersonated by %'")" 0 "the session token of the impersonation is revoked"
 check "$(active_records)" 0 "the impersonation has ended"
+
+echo "== C4. the path of a refused request does not forge log lines"
+login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" alice)" 200 "admin impersonates alice"
+LOGGED=$(log_count 'Refused GET /apps/oauth2/e2e?forged for user "alice"')
+code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' -b "$A" -c "$A" "$BASE/index.php/apps/oauth2/e2e%0Aforged")
+case "$code" in
+	403)
+		ok "a forbidden path with a line break in it is refused (403)"
+		check "$(( $(log_count 'Refused GET /apps/oauth2/e2e?forged for user "alice"') - LOGGED ))" 1 "... and logged with the line break replaced"
+		check "$(log_count $'e2e\nforged')" 0 "... no line break of the request reaches the log"
+		;;
+	400 | 404) ok "the web server rejects a path with a line break itself ($code)" ;;
+	*) bad "GET with a line break in the path -> $code" ;;
+esac
+logout "$A" >/dev/null; check "$(whoami_ "$A")" admin "admin returned"
 
 echo "== D. invalid targets"
 login "$A" admin "$ADMIN_PASSWORD"
@@ -307,6 +345,13 @@ check "$(( $(log_count 'refused: an impersonation must be started from an intera
 check "$(whoami_ "$A")" admin "the interactive session of the administrator is unaffected"
 # the operator can accept such starts (instances where every request of a browser carries credentials)
 setcfg allow_start_with_credentials true
+# ... but the start is still a deliberate action of the user interface: the app asks for the CSRF
+# token itself (the platform does not ask a request with credentials for it)
+NO_TOKEN=$(log_count 'the request has no valid CSRF token')
+check "$(curl -s -o "$W/j" -w '%{http_code}' -c "$J" -b "$J" -u "admin:$ADMIN_PASSWORD" -X POST "$BASE/index.php/apps/impersonate/user" --data-urlencode target=alice)" 404 "with allow_start_with_credentials a request with credentials and without the CSRF token is refused"
+app_body "$W/j" cannotImpersonate "... with the generic error"
+check "$(( $(log_count 'the request has no valid CSRF token') - NO_TOKEN ))" 1 "... and the reason is logged"
+[ "$(whoami_ "$J")" != alice ] && ok "... the session of the request is not alice" || bad "a request without the CSRF token got a session of alice"
 check "$(curl -s -o /dev/null -w '%{http_code}' -c "$J2" -b "$J2" -H "requesttoken: $(token "$J2")" -X POST "$BASE/index.php/apps/impersonate/user" --data-urlencode target=alice)" 200 "with allow_start_with_credentials the same request starts an impersonation"
 check "$(whoami_ "$J2")" alice "the session is alice's"
 logout "$J2" >/dev/null; check "$(whoami_ "$J2")" admin "... and returns to admin"
@@ -337,9 +382,17 @@ login "$A" admin "$ADMIN_PASSWORD"
 check "$(put_policy "$A" '{"mode":"include_groups","groups":["g1","e2e-group","no-such-group",5],"allowGroupAdminTargets":true}')" 200 "admin stores a policy"
 check "$(cat "$W/policy")" '{"policy":{"mode":"include_groups","groups":["g1","e2e-group"],"allowGroupAdminTargets":true}}' "the answer is the stored policy, without the group that does not exist"
 check "$(cfg impersonate_include_groups_list)" '["g1","e2e-group"]' "the group list is stored"
-check "$(cfg impersonate_include_groups)$(cfg impersonate_all_groupadmins)$(cfg impersonate_allow_groupadmin_targets)" truefalsetrue "the mode and the option are stored"
+check "$(cfg impersonate_include_groups)$(cfg impersonate_all_groupadmins)" truefalse "the mode is stored"
+# the consent to group admins as targets is stored with the delegation it was given for: two saves
+# that overlap can not combine the mode of one with the consent of the other
+check "$(cfg impersonate_allow_groupadmin_targets)" '{"mode":"include_groups","groups":["g1","e2e-group"]}' "the option is stored with the delegation it was given for"
+SWITCHED_OFF=$(log_count 'was switched off: it was given for the deleted group "e2e-group"')
 occ group:delete e2e-group >/dev/null
 check "$(cfg impersonate_include_groups_list)" '["g1"]' "a deleted group leaves the list"
+# switching it off can never broaden the delegation, whatever was saved meanwhile
+check "$(cfg impersonate_allow_groupadmin_targets)" false "... and the option given for a list with it is switched off"
+check "$(( $(log_count 'was switched off: it was given for the deleted group "e2e-group"') - SWITCHED_OFF ))" 1 "... which is logged"
+check "$(curl -s -b "$A" -H "requesttoken: $(token "$A")" "$BASE/index.php/apps/impersonate/getimpersonatedata")" '["[\"g1\"]","true","false",true,false,"[]"]' "the administrator still sees the policy"
 check "$(put_policy "$A" '{"mode":"everybody","groups":[]}')" 400 "an unknown mode is refused"
 check "$(cfg impersonate_include_groups_list)$(cfg impersonate_include_groups)" '["g1"]true' "... and changes nothing"
 check "$(curl -s -o /dev/null -w '%{http_code}' -b "$A" -c "$A" -H 'Content-Type: application/json' -X PUT "$BASE/index.php/apps/impersonate/policy" --data '{"mode":"all_groupadmins"}')" 412 "without the CSRF token: refused"
@@ -509,6 +562,13 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/index.php/apps/impe
 [ "$code" != 503 ] && ok "without an active impersonation requests are not looked at ($code)" || bad "a request was refused without an active impersonation"
 check "$(sql "select count(*) from oc_preferences where userid='bob' and configkey='signing-key'")" 0 "no URL signing key was obtained for bob"
 check "$(sql "select count(*) from oc_authtoken where name='e2e-evil'")" 0 "no app password was created for bob"
+# the session of one impersonation must not present the session id of another one either
+login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" bob)" 200 "admin impersonates bob"
+A3=$W/admin-three; login "$A3" admin "$ADMIN_PASSWORD"; check "$(imp "$A3" alice)" 200 "... and alice in another browser"
+check "$(curl -s -o /dev/null -w '%{http_code}' -b "$A3" -c "$A3" -G "$BASE/index.php/apps/files/" --data-urlencode "probe=$(rawsid "$A")")" 401 "an impersonated session that presents the session id of another impersonation: refused"
+check "$(whoami_ "$A")" anonymous "... the other impersonation is ended"
+check "$(whoami_ "$A3")" anonymous "... and so is the one that presented it"
+check "$(active_records)" 0 "no impersonation is left"
 # what is none of the app's business stays as it is: the session of another user, presented the same
 # way while an impersonation is active
 login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" bob)" 200 "admin impersonates bob"
@@ -564,6 +624,55 @@ else
 	bad "requests of others got another answer while somebody was impersonated: $(command grep '^[<>]' "$W/others-diff" | tr '\n' ' ')"
 fi
 check "$(whoami_ "$A")" bob "the impersonation was not affected by them"
+logout "$A" >/dev/null; check "$(whoami_ "$A")" admin "admin returned"
+check "$(active_records)" 0 "no impersonation is left"
+
+echo "== R. maintenance window: occ impersonate:active --block, --end, --unblock and the exit status"
+occ impersonate:active --block > "$W/out"; check "$?" 0 "--block"
+command grep -q '^New impersonations are blocked until occ impersonate:active --unblock.$' "$W/out" && ok "... says so" || bad "--block: $(cat "$W/out")"
+login "$A" admin "$ADMIN_PASSWORD"
+BLOCKED=$(log_count 'new impersonations are blocked')
+check "$(imp "$A" alice)" 404 "no impersonation starts while new ones are blocked"
+app_body "$W/body" 'contact your server administrator' "... the answer names the administrator"
+check "$(( $(log_count 'new impersonations are blocked') - BLOCKED ))" 1 "... and the refusal is logged"
+check "$(active_records)" 0 "... nothing was recorded"
+occ impersonate:active | command grep -q '^New impersonations are blocked (occ impersonate:active --unblock).$' && ok "the listing says that new impersonations are blocked" || bad "the listing does not show the block"
+occ impersonate:active --end > "$W/out"; check "$?" 0 "--end with nothing active and nothing to clean up: status 0"
+occ impersonate:active --unblock > "$W/out"; check "$?" 0 "--unblock"
+check "$(imp "$A" alice)" 200 "impersonations start again"
+occ impersonate:active --end --block > "$W/out"; check "$?" 0 "--end --block: status 0 once nothing is active or waits for its cleanup"
+command grep -q '^Ended 1 impersonation(s).$' "$W/out" && ok "... it ended the impersonation" || bad "--end --block: $(cat "$W/out")"
+command grep -q 'can still be started' "$W/out" && bad "--end --block says new impersonations can still be started" || ok "... and new ones can not start"
+check "$(whoami_ "$A")" anonymous "its session is logged out"
+login "$A" admin "$ADMIN_PASSWORD"; check "$(imp "$A" alice)" 404 "no new impersonation starts until --unblock"
+occ impersonate:active --unblock >/dev/null
+# a cleanup that is still open: an impersonation of a user that can not be loaded, ended a moment ago
+NOW=$(date +%s)
+setcfg active_e2epending000000 "{\"impersonator\":\"admin\",\"target\":\"e2e-nobody\",\"token\":999999999,\"signingKey\":true,\"start\":$((NOW - 120)),\"pending\":true,\"ended\":$((NOW - 60))}"
+occ impersonate:active > "$W/out"; check "$?" 0 "listing is no gate (status 0)"
+command grep -q 'The cleanup after 1 impersonation(s) is not complete yet' "$W/out" && ok "... it shows the open cleanup" || bad "listing: $(cat "$W/out")"
+occ impersonate:active --end > "$W/out"; check "$?" 3 "--end while a cleanup is still open: status 3"
+command grep -q 'The session token of 1 of them is not known to be revoked yet' "$W/out" && ok "... and says that its session token is not known to be revoked" || bad "--end: $(cat "$W/out")"
+command grep -q '^  record active_e2epending000000: admin impersonated e2e-nobody, ended .*, session token not known to be revoked$' "$W/out" && ok "... and names the record" || bad "--end does not name the record: $(cat "$W/out")"
+check "$(sql "select count(*) from oc_jobs where class like '%Impersonate%Reconcile'")" 1 "the background job stays for the retry"
+occ config:app:delete impersonate active_e2epending000000 >/dev/null
+occ impersonate:active --end > "$W/out"; check "$?" 0 "... status 0 once it is done"
+occ impersonate:active --block --unblock > "$W/out" 2>&1; check "$?" 2 "--block together with --unblock: status 2"
+check "$(occ config:app:get impersonate starts_blocked)" "" "... and nothing is blocked"
+
+echo "== S. an impersonation starts only if the app is enabled for everybody"
+check "$(occ config:app:get impersonate enabled)" yes "an app enabled for everybody has the value 'yes'"
+# ownCloud refuses to enable an authentication app for groups; written into the configuration, the
+# app would not be loaded for the session of an impersonated user outside those groups
+occ config:app:set impersonate enabled --value='["admin"]' >/dev/null
+NOT_ALL=$(log_count 'not enabled for everybody')
+login "$A" admin "$ADMIN_PASSWORD"
+check "$(imp "$A" alice)" 404 "enabled for some groups only: no impersonation starts"
+check "$(( $(log_count 'not enabled for everybody') - NOT_ALL ))" 1 "... and the reason is logged"
+check "$(active_records)" 0 "... nothing was recorded"
+occ impersonate:active | command grep -q '^Warning: the app is not enabled for everybody' && ok "occ impersonate:active warns about it" || bad "no warning of occ impersonate:active"
+occ config:app:set impersonate enabled --value=yes >/dev/null
+check "$(imp "$A" alice)" 200 "enabled for everybody again: it starts"
 logout "$A" >/dev/null; check "$(whoami_ "$A")" admin "admin returned"
 check "$(active_records)" 0 "no impersonation is left"
 

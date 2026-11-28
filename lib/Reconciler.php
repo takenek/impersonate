@@ -58,8 +58,6 @@ class Reconciler {
 	private $auditTrail;
 	/** @var ILogger */
 	private $logger;
-	/** @var int[] ids of the session tokens of all recorded impersonations (for the cleanup of one of them) */
-	private $otherTokens = [];
 
 	public function __construct(
 		ActiveImpersonations $registry,
@@ -78,11 +76,12 @@ class Reconciler {
 	}
 
 	/**
-	 * @return array<string, array<string, mixed>> id => record of the impersonations that have not ended
+	 * @return array<string, array<string, mixed>> id => record of the impersonations that have not ended,
+	 *                                             as the database has them now
 	 */
 	public function getActive(): array {
 		$active = [];
-		foreach ($this->registry->all() as $id => $record) {
+		foreach ($this->registry->allFresh() as $id => $record) {
 			if ($record !== null && !isset($record['pending'])) {
 				$active[(string)$id] = $record;
 			}
@@ -94,10 +93,41 @@ class Reconciler {
 	 * @return int number of impersonations that have ended but whose cleanup is still to be retried
 	 */
 	public function countPending(): int {
-		$pending = 0;
-		foreach ($this->registry->allFresh() as $record) {
+		return \count($this->getPending());
+	}
+
+	/**
+	 * @return int number of impersonations that have ended but whose session token is not known to
+	 *             be revoked yet (a part of countPending())
+	 */
+	public function countPendingWithoutRevokedToken(): int {
+		return \count(\array_filter($this->getPending(), [ActiveImpersonations::class, 'namesCredential']));
+	}
+
+	/**
+	 * Block or allow new impersonations (maintenance window, see ActiveImpersonations).
+	 */
+	public function blockStarts(bool $blocked): void {
+		if ($blocked) {
+			$this->registry->blockStarts();
+		} else {
+			$this->registry->allowStarts();
+		}
+	}
+
+	public function startsBlocked(): bool {
+		return $this->registry->startsBlocked();
+	}
+
+	/**
+	 * @return array<string, array<string, mixed>> id => record of the impersonations that have ended
+	 *                                             but wait for their cleanup, as the database has them now
+	 */
+	public function getPending(): array {
+		$pending = [];
+		foreach ($this->registry->allFresh() as $id => $record) {
 			if ($record !== null && isset($record['pending'])) {
-				$pending++;
+				$pending[(string)$id] = $record;
 			}
 		}
 		return $pending;
@@ -113,7 +143,6 @@ class Reconciler {
 		// As the database has them now, not as this process read the app config when it
 		// started: a cron run must not act on what a session has ended or changed since.
 		$records = $this->registry->allFresh();
-		$this->otherTokens = ActiveImpersonations::tokenIds($records);
 		foreach ($records as $id => $record) {
 			$id = (string)$id;
 			try {
@@ -147,13 +176,25 @@ class Reconciler {
 	 */
 	public function end(string $id, array $record, string $reason, ?int $now = null): void {
 		$now = $now ?? \time();
-		// as the database has them now: an impersonation that started a moment ago keeps its session
-		$this->otherTokens = ActiveImpersonations::tokenIds($this->registry->allFresh());
-		if (isset($record['pending'])) {
-			$this->retryCleanup($id, $record, $now);
+		// As the database has them now: an impersonation that started a moment ago keeps its
+		// session, and what is decided below is decided on the record as it is now, not as the
+		// caller read it (another request may have ended or changed it in between).
+		$records = $this->registry->allFresh();
+		$current = $records[$id] ?? null;
+		if ($current === null) {
+			// Ended and reported elsewhere meanwhile (or unreadable). Its token was presented
+			// a moment ago: it is revoked in any case, nothing is reported a second time.
+			$target = $this->userManager->get($record['target']);
+			if ($target !== null) {
+				$this->cleanup->revokeSessionToken($target, $record['token']);
+			}
 			return;
 		}
-		$this->finish($id, $record, $this->userManager->get($record['target']), $reason, $now);
+		if (isset($current['pending'])) {
+			$this->retryCleanup($id, $current, $now);
+			return;
+		}
+		$this->finish($id, $current, $this->userManager->get($current['target']), $reason, $now);
 	}
 
 	/**
@@ -208,7 +249,7 @@ class Reconciler {
 				'reason' => $reason,
 			]
 		);
-		$this->auditTrail->ended($record['impersonator'], $record['target'], $reason);
+		$this->auditTrail->ended($record['impersonator'], $record['target'], $reason, $id);
 	}
 
 	/**
@@ -216,23 +257,31 @@ class Reconciler {
 	 */
 	private function retryCleanup(string $id, array $record, int $now): void {
 		$target = $this->userManager->get($record['target']);
-		if ($this->cleanUp($id, $record, $target, $now)) {
+		$result = $this->cleanUp($id, $record, $target, $now);
+		if ($result['closed'] || $now - $record['ended'] <= self::GIVE_UP_AFTER) {
 			return;
 		}
-		if ($now - $record['ended'] > self::GIVE_UP_AFTER) {
-			if ($target === null) {
-				$this->logger->warning(
-					'Dropping the cleanup after the impersonation of user "{target}" by "{impersonator}": the user does not exist',
-					['app' => 'impersonate', 'target' => $record['target'], 'impersonator' => $record['impersonator']]
-				);
-			} else {
-				$this->logger->error(
-					'Giving up the cleanup after the impersonation of user "{target}" by "{impersonator}": check the sessions and app passwords of that user',
-					['app' => 'impersonate', 'target' => $record['target'], 'impersonator' => $record['impersonator']]
-				);
-			}
-			$this->registry->close($id);
+		if ($target === null) {
+			// deleted: its tokens went with it
+			$this->logger->warning(
+				'Dropping the cleanup after the impersonation of user "{target}" by "{impersonator}": the user does not exist',
+				['app' => 'impersonate', 'target' => $record['target'], 'impersonator' => $record['impersonator']]
+			);
+		} elseif (!$result['tokenRevoked']) {
+			// As long as the session token is not known to be revoked the record has to name it
+			// (cleanUp()): it is kept, however long that takes.
+			$this->logger->error(
+				'The session token of the impersonation of user "{target}" by "{impersonator}" could still not be revoked: the record is kept, check the sessions of that user and the ownCloud log',
+				['app' => 'impersonate', 'target' => $record['target'], 'impersonator' => $record['impersonator']]
+			);
+			return;
+		} else {
+			$this->logger->error(
+				'Giving up the cleanup after the impersonation of user "{target}" by "{impersonator}": check the sessions and app passwords of that user',
+				['app' => 'impersonate', 'target' => $record['target'], 'impersonator' => $record['impersonator']]
+			);
 		}
+		$this->registry->close($id);
 	}
 
 	/**
@@ -242,9 +291,11 @@ class Reconciler {
 	 * known to be revoked, the record has to name it (ImpersonationGuard).
 	 *
 	 * @param array<string, mixed> $record
-	 * @return bool true if the record was closed
+	 * @return array{closed: bool, tokenRevoked: bool} whether the record was closed, and whether the
+	 *                                                  session token is known to be revoked
 	 */
-	private function cleanUp(string $id, array $record, ?IUser $target, int $now): bool {
+	private function cleanUp(string $id, array $record, ?IUser $target, int $now): array {
+		$wasRevoked = ($record['tokenRevoked'] ?? false) === true;
 		if ($target === null) {
 			// The user was deleted (then its tokens are gone with it) - or its backend does
 			// not answer right now (then nothing can be revoked yet). Retried until
@@ -252,21 +303,23 @@ class Reconciler {
 			if (!isset($record['pending'])) {
 				$this->registry->markPending($id, $record, $now);
 			}
-			return false;
+			return ['closed' => false, 'tokenRevoked' => $wasRevoked];
 		}
 		$revoked = $this->cleanup->revokeSessionToken($target, $record['token']);
+		// Another impersonation of the same user (a later or a parallel one) keeps its session: the
+		// records as the database has them right before this cleanup, not when the run started.
+		$others = ActiveImpersonations::tokenIds($this->registry->allFresh());
 		$result = $this->cleanup->run(
 			$target,
 			$record['token'],
 			$record['signingKey'],
 			$record['impersonator'],
 			$record['ceiling'] ?? null,
-			// another impersonation of the same user (a later or a parallel one) keeps its session
-			\array_values(\array_diff($this->otherTokens, [$record['token']]))
+			\array_values(\array_diff($others, [$record['token']]))
 		);
 		if ($revoked && $result['tokens'] && $result['signingKey']) {
 			$this->registry->close($id);
-			return true;
+			return ['closed' => true, 'tokenRevoked' => true];
 		}
 		$this->registry->markPending(
 			$id,
@@ -275,8 +328,9 @@ class Reconciler {
 			// Only once the session is known to be over is "what appeared later" none of
 			// its doing.
 			$revoked ? $result['ceiling'] : null,
-			$result['signingKey']
+			$result['signingKey'],
+			$revoked
 		);
-		return false;
+		return ['closed' => false, 'tokenRevoked' => $revoked || $wasRevoked];
 	}
 }

@@ -279,4 +279,71 @@ class ActiveImpersonationsTest extends TestCase {
 		$this->registry->close('../enabled');
 		$this->assertSame(['enabled' => 'yes'], $this->appValues);
 	}
+
+	public function testARecordRemembersThatItsSessionTokenIsRevoked(): void {
+		$id = $this->registry->open(self::RECORD);
+		$this->registry->markPending($id, self::RECORD, 1700000100, 40, false, true);
+		$pending = self::RECORD + ['pending' => true, 'ended' => 1700000100, 'ceiling' => 40, 'tokenRevoked' => true];
+		$this->assertSame($pending, $this->registry->get($id));
+		// once known, it stays known
+		$this->registry->markPending($id, $pending, 1700000200);
+		$this->assertSame($pending, $this->registry->get($id));
+		$this->assertFalse(ActiveImpersonations::namesCredential($pending), 'such a record names no credential');
+	}
+
+	public function testOnlyARecordThatWaitsForItsCleanupCanSayThatItsTokenIsRevoked(): void {
+		$id = $this->registry->open(self::RECORD + ['tokenRevoked' => true]);
+		$this->assertSame(self::RECORD, $this->registry->get($id));
+		$this->assertTrue(ActiveImpersonations::namesCredential(self::RECORD));
+		$this->assertTrue(ActiveImpersonations::namesCredential(self::RECORD + ['pending' => true, 'ended' => 1]));
+		$this->assertFalse(ActiveImpersonations::namesCredential(null));
+		// what is not exactly true is no such statement
+		$this->assertNull(ActiveImpersonations::decode(\json_encode(['tokenRevoked' => 'yes'] + self::RECORD))['tokenRevoked'] ?? null);
+		$this->assertTrue(ActiveImpersonations::namesCredential(ActiveImpersonations::decode(\json_encode(self::RECORD + ['pending' => true, 'tokenRevoked' => 1]))));
+	}
+
+	public function testAPendingRecordMakesSureTheReconcileJobIsThere(): void {
+		// its registration failed when the impersonation started (it is only logged then)
+		$this->jobList->method('has')->willReturn(false);
+		$this->jobList->expects($this->once())->method('add')->with(Reconcile::class);
+		$this->registry->markPending('abcdefgh12345678', self::RECORD, 1700000100);
+	}
+
+	public function testAnImpersonationThatStartsWhileTheJobIsReleasedGetsItBack(): void {
+		// nothing is recorded when the release looks, a record exists right after the removal
+		$this->rows = [];
+		$this->jobList->expects($this->once())->method('remove')->with(Reconcile::class)->willReturnCallback(function () {
+			$this->rows = [['configkey' => 'active_abcdefgh12345678', 'configvalue' => \json_encode(self::RECORD)]];
+		});
+		$this->jobList->method('has')->willReturn(false);
+		$this->jobList->expects($this->once())->method('add')->with(Reconcile::class);
+		$this->registry->releaseReconcileJobIfIdle();
+	}
+
+	public function testStartsCanBeBlocked(): void {
+		// read from the database: the block is set by occ in another process
+		$this->assertFalse($this->registry->startsBlocked());
+		$this->registry->blockStarts();
+		$this->assertSame('true', $this->appValues['starts_blocked']);
+		$this->assertFalse($this->registry->startsBlocked(), 'what this process wrote is not what the database says');
+		$this->rows = [['configkey' => 'starts_blocked', 'configvalue' => 'true']];
+		$this->assertTrue($this->registry->startsBlocked());
+		$this->rows = [['configkey' => 'starts_blocked', 'configvalue' => 'yes']];
+		$this->assertFalse($this->registry->startsBlocked(), 'only "true" blocks');
+		$this->registry->allowStarts();
+		$this->assertArrayNotHasKey('starts_blocked', $this->appValues);
+		// the block is no record
+		$this->rows = [['configkey' => 'starts_blocked', 'configvalue' => 'true']];
+		$this->assertSame([], $this->registry->allFresh());
+	}
+
+	public function testARecordThatIsLeftGetsTheJobBack(): void {
+		// e.g. its registration failed when the impersonation started: occ impersonate:active --end
+		// leaves the job there for it
+		$this->rows = [['configkey' => 'active_abcdefgh12345678', 'configvalue' => \json_encode(self::RECORD)]];
+		$this->jobList->expects($this->never())->method('remove');
+		$this->jobList->method('has')->willReturn(false);
+		$this->jobList->expects($this->once())->method('add')->with(Reconcile::class);
+		$this->registry->releaseReconcileJobIfIdle();
+	}
 }

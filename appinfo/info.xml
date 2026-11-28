@@ -16,13 +16,13 @@ Maintained by Marek Królikowski (TaKeN), TaKeN.PL Usługi Informatyczne Marek K
 </description>
 	<licence>AGPL</licence>
 	<author>Marek Królikowski (TaKeN)</author>
-	<version>1.0.3</version>
+	<version>1.0.4</version>
         <types>
 	       <authentication/>
         </types>
 	<namespace>Impersonate</namespace>
 	<documentation>
-	<admin>https://doc.owncloud.com/server/latest/admin_manual/configuration/general_topics/impersonate_users.html</admin>
+	<admin>https://github.com/takenek/impersonate/blob/main/README.md</admin>
 	</documentation>
 	<bugs>https://github.com/takenek/impersonate/issues</bugs>
 	<repository type="git">https://github.com/takenek/impersonate.git</repository>

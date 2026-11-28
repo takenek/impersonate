@@ -180,6 +180,9 @@ jobs:
       # tool (which also ends with a non-zero status) is not a detection.
       - name: gitleaks detects a planted secret
         run: |
+          # gitleaks up to 8.30.1 creates its report file with default permissions
+          # (CVE-2026-124039, no fixed release yet): the only report, of a synthetic key, is private
+          umask 077
           mkdir -p "$RUNNER_TEMP/control"
           openssl genpkey -algorithm ed25519 -out "$RUNNER_TEMP/control/id_ed25519" 2>/dev/null
           rc=0
@@ -191,6 +194,15 @@ jobs:
           fi
           jq -e 'type == "array" and any(.[]; .RuleID == "private-key")' "$RUNNER_TEMP/control.json" > /dev/null \
             || { echo "gitleaks ended with status $rc without reporting the planted key as a private key" >&2; exit 1; }
+      # A tracked link would end up in the release archive, where it could point anywhere on the
+      # installing system (tests/ci/check-archive.sh and "make dist" refuse it as well).
+      - name: No symbolic links in the repository
+        run: |
+          links=$(git ls-files -s | awk '$1 == "120000" {print $4}')
+          if [ -n "$links" ]; then
+            echo "the repository tracks symbolic links: $links" >&2
+            exit 1
+          fi
       - name: Scan the history
         run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --no-banner --redact --verbose --config .gitleaks.toml .'
       - name: Scan the tree
@@ -247,7 +259,9 @@ jobs:
         run: tests/e2e/security-checks.sh
       - name: Headless browser test
         run: |
-          # the browser test library with the integrity hash of tests/ui/package-lock.json
+          # the browser test library with the integrity hash of tests/ui/package-lock.json; the browser
+          # build it downloads is the one that library version names, but it is not checked against a
+          # checksum kept in this repository (it only drives the test and is no part of the release)
           npm ci --prefix tests/ui --no-audit --no-fund
           (cd tests/ui && npx --no-install playwright-core install --with-deps chromium)
           SHOTS="$RUNNER_TEMP/screenshots" node tests/ui/ui-impersonate.js

@@ -120,4 +120,13 @@ class NotifierTest extends TestCase {
 		$this->expectException(\InvalidArgumentException::class);
 		$this->notifier->prepare($notification, 'de');
 	}
+
+	public function testANameStoredByAnEarlierVersionIsShownAsPlainText(): void {
+		// up to 1.0.3 the name was stored as its client gave it
+		$notification = $this->notification('impersonate', Notifier::SUBJECT_CREDENTIAL_REVOKED, ["evil\nname\u{202E}gnp.exe", Notifier::CREDENTIAL_SESSION]);
+		$notification->expects($this->once())->method('setParsedSubject')->with($this->callback(function (string $subject) {
+			return \strpos($subject, '"evil namegnp.exe"') !== false && \preg_match('/[\x00-\x1F]|\x{202E}/u', $subject) === 0;
+		}));
+		$this->notifier->prepare($notification, 'de');
+	}
 }

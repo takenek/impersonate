@@ -345,7 +345,10 @@ async function usersPage(page) {
         await a.page.screenshot({ path: path.join(SHOTS, '05-admin-settings-groups.png'), fullPage: true });
         r = await saved(() => a.page.click('label[for=impersonateGroupAdminTargets]'));
         check(r.sent.length === 1 && r.sent[0].allowGroupAdminTargets === true && r.sent[0].mode === 'include_groups' && JSON.stringify(r.sent[0].groups) === '["g1"]', 'the group admin target option is stored together with the rest');
-        check(appConfig('impersonate_allow_groupadmin_targets') === 'true', '... on the server');
+        // stored with the delegation it was given for (two saves that overlap can not mix them)
+        const consent = (() => { try { return JSON.parse(appConfig('impersonate_allow_groupadmin_targets')); } catch (e) { return null; } })();
+        check(consent !== null && consent.mode === 'include_groups' && JSON.stringify(consent.groups) === '["g1"]',
+          `... on the server, with the delegation it was given for (${JSON.stringify(consent)})`);
 
         // a request that fails: the panel must not go on showing what was not stored
         a.expected.failures = true;

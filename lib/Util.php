@@ -2,8 +2,8 @@
 /**
  * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
  * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
- * Modified on 2026-11-26 and 2026-11-27 by Marek Królikowski (TaKeN): ownCloud 11.1 support and
- * security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * Modified on 2026-11-26, 2026-11-27 and 2026-11-28 by Marek Królikowski (TaKeN): ownCloud 11.1
+ * support and security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
  * See LICENSE and COPYRIGHT.
  *
  * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
@@ -245,12 +245,22 @@ class Util {
 	}
 
 	/**
+	 * Are new impersonations blocked for a maintenance window (occ impersonate:active --block)?
+	 *
+	 * @throws \Exception if that can not be read
+	 */
+	public function areStartsBlocked(): bool {
+		return $this->registry->startsBlocked();
+	}
+
+	/**
 	 * Replace the session of $impersonator by a session of $target.
 	 *
 	 * @throws RefusedException if the session is not one an impersonation may start
 	 *                          from; nothing was changed
-	 * @throws \Exception if the current session cannot be switched; the session is
-	 *                    logged out if it was already partially switched
+	 * @throws \Exception if the current session cannot be switched (also when new impersonations
+	 *                    were blocked after the caller looked); the session is logged out if it
+	 *                    was already partially switched
 	 */
 	public function startImpersonation(IUser $target, IUser $impersonator): void {
 		if ($this->isImpersonating()) {
@@ -338,6 +348,12 @@ class Util {
 				'sid' => \strlen((string)$this->session->getId()),
 			]);
 			$this->session->set(self::SESSION_RECORD, $recordId);
+			// Blocked after the caller looked (occ impersonate:active --block runs in another
+			// process): the record exists now, so whoever blocked the starts and then ended every
+			// recorded impersonation either saw this one or is seen here. Rolled back below.
+			if ($this->registry->startsBlocked()) {
+				throw new RefusedException('new impersonations are blocked (occ impersonate:active --unblock)');
+			}
 
 			$this->userSession->setUser($target);
 			$this->userSession->setLoginName($target->getUID());
@@ -470,7 +486,7 @@ class Util {
 			return false;
 		}
 		$this->settleRecord($recordId, true, $result);
-		$this->auditTrail->ended($impersonatorUid, $targetUid, self::REASON_RETURNED);
+		$this->auditTrail->ended($impersonatorUid, $targetUid, self::REASON_RETURNED, $recordId);
 		return true;
 	}
 
@@ -496,8 +512,15 @@ class Util {
 		$result = ['tokens' => false, 'signingKey' => false, 'ceiling' => null];
 		$revoked = false;
 		$closedElsewhere = false;
+		// tokens with a higher id appeared after the end elsewhere (what the record waiting for its
+		// cleanup says), null if not known
+		$ceiling = null;
 		try {
-			$closedElsewhere = $this->isClosedElsewhere($recordId);
+			$record = $recordId !== null ? $this->registry->get($recordId) : null;
+			$closedElsewhere = $recordId !== null && ($record === null || isset($record['pending']));
+			if ($record !== null && isset($record['pending'], $record['ceiling'])) {
+				$ceiling = $record['ceiling'];
+			}
 		} catch (\Throwable $e) {
 			$this->logger->logException($e, ['app' => 'impersonate']);
 		}
@@ -522,7 +545,9 @@ class Util {
 				// wherever the session is now: the token it was started with
 				$revoked = $tokenId === null || $this->cleanup->revokeSessionToken($target, $tokenId);
 				if ($sessionWasAlive) {
-					$result = $this->cleanUpCredentials($target);
+					// Not more than the cleanup elsewhere may touch: what the account owner created
+					// after the end there is out of reach (null: up to now, the session was alive).
+					$result = $this->cleanUpCredentials($target, $ceiling);
 					$cleaned = true;
 				} else {
 					$result = ['tokens' => true, 'signingKey' => true, 'ceiling' => null];
@@ -568,7 +593,7 @@ class Util {
 			return;
 		}
 		$this->settleRecord($recordId, $revoked, $result);
-		$this->auditTrail->ended($impersonatorUid, $targetUid ?? '', $reason);
+		$this->auditTrail->ended($impersonatorUid, $targetUid ?? '', $reason, $recordId);
 	}
 
 	/**
@@ -695,7 +720,11 @@ class Util {
 		$this->session->regenerateId(false);
 	}
 
-	private function getRecordId(): ?string {
+	/**
+	 * @return string|null id of the server side record of the impersonation of this session (it
+	 *                     identifies the impersonation in audit events; it is no credential)
+	 */
+	public function getRecordId(): ?string {
 		$id = $this->session->get(self::SESSION_RECORD);
 		return \is_string($id) && $id !== '' ? $id : null;
 	}
@@ -745,7 +774,8 @@ class Util {
 					\time(),
 					// only once the session is known to be over is what appears later none of its doing
 					$revoked ? $cleanup['ceiling'] : null,
-					$cleanup['signingKey']
+					$cleanup['signingKey'],
+					$revoked
 				);
 			}
 		} catch (\Throwable $e) {
@@ -757,26 +787,31 @@ class Util {
 	 * Remove the credentials of the impersonated user that appeared during the
 	 * impersonation (see CredentialCleanup). Never throws.
 	 *
+	 * @param int|null $ceiling tokens with a higher id are left alone (see CredentialCleanup::run()),
+	 *                          null: everything up to now
 	 * @return array{tokens: bool, signingKey: bool, ceiling: int|null} see CredentialCleanup::run()
 	 */
-	private function cleanUpCredentials(IUser $target): array {
+	private function cleanUpCredentials(IUser $target, ?int $ceiling = null): array {
 		$watermark = $this->session->get(self::SESSION_TOKEN_WATERMARK);
 		if (!\is_int($watermark)) {
 			// the switch never got as far as a session of the target
 			return ['tokens' => true, 'signingKey' => true, 'ceiling' => null];
 		}
 		// Left alone whatever they look like: the session tokens of other impersonations of
-		// the same user, and the token of this session (it is revoked by its own means; a
-		// session that was switched by an older version has a mark below its own token).
-		$keep = [];
+		// the same user (as the database has them right now, not as this request read them), and
+		// the token of this session (it is revoked by its own means; a session that was switched
+		// by an older version has a mark below its own token).
 		try {
-			$keep = ActiveImpersonations::tokenIds($this->registry->all());
+			$keep = ActiveImpersonations::tokenIds($this->registry->allFresh());
 			$current = $this->findToken($this->currentSessionId());
 			if ($current !== null) {
 				$keep[] = (int)$current->getId();
 			}
 		} catch (\Throwable $e) {
 			$this->logger->logException($e, ['app' => 'impersonate']);
+			// Which sessions have to be left alone is not known: nothing is revoked now, the
+			// record waits for the reconcile job, which reads them itself.
+			return ['tokens' => false, 'signingKey' => false, 'ceiling' => null];
 		}
 		return $this->cleanup->run(
 			$target,
@@ -784,7 +819,7 @@ class Util {
 			// only a recorded "there was none" allows the removal
 			$this->session->get(self::SESSION_SIGNING_KEY_EXISTED) !== false,
 			$this->getImpersonatorUid(),
-			null,
+			$ceiling,
 			$keep
 		);
 	}

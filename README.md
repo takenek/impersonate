@@ -1,7 +1,7 @@
 # Impersonate (`impersonate`) – log in as another user on ownCloud 11
 
 [![CI](https://github.com/takenek/impersonate/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/impersonate/actions/workflows/ci.yml)
-[![Release](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/release-v1.0.3.svg)](https://github.com/takenek/impersonate/releases/latest)
+[![Release](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/release-v1.0.4.svg)](https://github.com/takenek/impersonate/releases/latest)
 [![License](https://raw.githubusercontent.com/takenek/impersonate/main/.github/badges/license.svg)](LICENSE)
 
 Impersonate lets ownCloud administrators – and, if allowed, group admins – log in as another user
@@ -29,21 +29,22 @@ Documentation: [SECURITY.md](SECURITY.md) · [CHANGELOG.md](CHANGELOG.md) · [CO
 | ownCloud | 11.x (tested: **11.1.0**) – classic web UI |
 | PHP | **8.3** (ownCloud 11.1 runs only on PHP 8.3) |
 | Database | any database supported by ownCloud; the app has no tables (tested: SQLite, MariaDB 11.8, PostgreSQL 17) |
-| Web server | any setup ownCloud supports (tested: Apache 2.4 with mod_php, nginx 1.26 with PHP-FPM as the ownCloud documentation configures it; CI uses PHP's built-in server) |
+| Web server | any setup ownCloud supports (tested: Apache 2.4 with mod_php, nginx 1.26 with PHP-FPM as the ownCloud documentation configures it; CI uses PHP's built-in server). PHP must start with a fresh state for every request (PHP-FPM, mod_php, CGI/FastCGI): long-running worker modes are not supported |
+| Sessions | a session handler that locks the session while a request uses it (PHP's default file handler does; for Redis switch on `redis.session.locking_enabled`, which is off by default; for Memcached keep `memcached.sess_locking` on) |
 | Languages | the 115 languages and language variants of ownCloud 11.1 (section 6) |
 
 Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.6.x.
 
 ## 2. Installation
 
-1. Download `impersonate-1.0.3.tar.gz` and `impersonate-1.0.3.tar.gz.sha256` from the
+1. Download `impersonate-1.0.4.tar.gz` and `impersonate-1.0.4.tar.gz.sha256` from the
    [latest release](https://github.com/takenek/impersonate/releases/latest) and verify the archive:
 
    ```bash
-   sha256sum -c impersonate-1.0.3.tar.gz.sha256
+   sha256sum -c impersonate-1.0.4.tar.gz.sha256
    ```
 
-   The release archive is built by CI from the signed tag `v1.0.3` (see [SECURITY.md](SECURITY.md),
+   The release archive is built by CI from the signed tag `v1.0.4` (see [SECURITY.md](SECURITY.md),
    "Verifying a release"; the archive contains the SECURITY.md of its version).
 
 2. Extract it into an app directory of your ownCloud (the archive contains the folder
@@ -53,7 +54,7 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
    server's group may only read them. Replace `www-data` by the group of your web server:
 
    ```bash
-   sudo tar -xzf impersonate-1.0.3.tar.gz -C /var/www/owncloud/apps-external
+   sudo tar -xzf impersonate-1.0.4.tar.gz -C /var/www/owncloud/apps-external
    sudo chown -R root:www-data /var/www/owncloud/apps-external/impersonate
    sudo chmod -R u=rwX,g=rX,o= /var/www/owncloud/apps-external/impersonate
    ```
@@ -76,7 +77,7 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
    verified archive:
 
    ```bash
-   CHECK=$(mktemp -d) && tar -xzf impersonate-1.0.3.tar.gz -C "$CHECK" \
+   CHECK=$(mktemp -d) && tar -xzf impersonate-1.0.4.tar.gz -C "$CHECK" \
      && sudo diff -r "$CHECK/impersonate" /var/www/owncloud/apps-external/impersonate && echo unchanged
    ```
 
@@ -101,9 +102,11 @@ Version 1.x does not support ownCloud 10. On ownCloud 10 use the original app 0.
 Read the "Upgrade notes" of the versions between yours and the new one in
 [CHANGELOG.md](CHANGELOG.md) first: 1.0.1 changes behaviour (no start through the API, maximum
 duration, group admins as targets, confirmation, background jobs); 1.0.2 and 1.0.3 change neither
-the configuration nor the behaviour. Disable nothing: the settings are kept. Run the commands in one
-shell, in the folder that holds the archive of the new version; replace `/var/www/owncloud` and
-`www-data` by the folder of your ownCloud and the user of your web server.
+the configuration nor the behaviour; 1.0.4 changes the exit status of `occ impersonate:active --end`
+and the behaviour in failure and edge cases (its upgrade notes). Disable nothing: the settings are
+kept. Run the commands in one shell, in the folder that holds the archive of the new version;
+replace `/var/www/owncloud` and `www-data` by the folder of your ownCloud and the user of your web
+server.
 
 1. Find the folder of the app and the installed version:
 
@@ -111,44 +114,62 @@ shell, in the folder that holds the archive of the new version; replace `/var/ww
    OCC="sudo -u www-data php /var/www/owncloud/occ"
    APPDIR=$($OCC app:getpath impersonate)
    echo "$APPDIR"                       # e.g. /var/www/owncloud/apps-external/impersonate
-   $OCC app:list impersonate            # Version: 1.0.2
+   $OCC app:list impersonate            # Version: 1.0.3
    ```
 
 2. Download and verify the archive of the new version (section 2, step 1).
 
-3. End the impersonations that are active. While the folder is replaced, ownCloud does not load the
-   app, so an impersonated session would be without its checks for that moment (the app 0.x and
-   1.0.0 have no such command: ask the impersonating administrators to log out instead):
+3. Block new impersonations and end the ones that are active. While the folder is replaced,
+   ownCloud does not load the app, so an impersonated session would be without its checks for that
+   moment. The installed version runs the command, so what it can do depends on that version:
 
    ```bash
-   $OCC impersonate:active --end
+   $OCC impersonate:active --end --block && echo "nothing is active"   # installed 1.0.4 or later
    ```
+
+   Continue only if it prints `nothing is active`: the exit status is 0 only when no impersonation
+   is active and no cleanup is still open afterwards; stop on any other status (1: an impersonation
+   could not be ended, 3: a cleanup, possibly the revocation of a session token, is still open – see
+   the ownCloud log and run the command again later). `--block` keeps new impersonations from
+   starting until `--unblock` (step 5). The command lists every record that still waits for its
+   cleanup (`record active_<id>: … impersonated …, ended …, session token …`). The cleanup of a user
+   that cannot be loaded (deleted, or its user backend is gone) stays open for seven days after the
+   end; if you know that the sessions of that user are gone, you can remove such a record yourself:
+   `$OCC config:app:delete impersonate active_<id>`.
+
+   Versions 1.0.1 to 1.0.3 have no `--block`, and only `--end` reports an open cleanup (not in its
+   exit status): run `$OCC impersonate:active --end` twice and continue only if the second run
+   prints nothing but `No active impersonations.`. These versions cannot block new impersonations:
+   ask the administrators not to start any until step 5. The app 0.x and 1.0.0 have no such
+   command: ask the impersonating administrators to log out instead.
 
 4. Replace the folder and keep the old one as a backup outside the app folders of ownCloud (ownCloud
    must not find two copies of the app). Name the backup after the installed version; it must not
    exist yet:
 
    ```bash
-   sudo mv "$APPDIR" /root/impersonate-1.0.2-backup
-   sudo tar -xzf impersonate-1.0.3.tar.gz -C "$(dirname "$APPDIR")"
+   sudo mv "$APPDIR" /root/impersonate-1.0.3-backup
+   sudo tar -xzf impersonate-1.0.4.tar.gz -C "$(dirname "$APPDIR")"
    sudo chown -R root:www-data "$APPDIR"
    sudo chmod -R u=rwX,g=rX,o= "$APPDIR"
    ```
 
-   If PHP's opcache does not check the time stamps of files (`opcache.validate_timestamps=0`),
-   reload PHP-FPM or Apache now.
+   Reload PHP-FPM or Apache now (for example `sudo systemctl reload php8.3-fpm` or
+   `sudo apachectl graceful`): PHP's opcache checks each file separately, at most every
+   `opcache.revalidate_freq` seconds (with `opcache.validate_timestamps=0` never), so until then a
+   request can run files of the old and of the new version together.
 
-5. Run the upgrade and check the result:
+5. Run the upgrade, check the result and, once it says `unchanged`, allow new impersonations again:
 
    ```bash
    $OCC upgrade
-   $OCC app:list impersonate            # Version: 1.0.3
-   $OCC impersonate:active              # the command of the app works
-   CHECK=$(mktemp -d) && tar -xzf impersonate-1.0.3.tar.gz -C "$CHECK" \
+   $OCC app:list impersonate            # Version: 1.0.4
+   CHECK=$(mktemp -d) && tar -xzf impersonate-1.0.4.tar.gz -C "$CHECK" \
      && sudo diff -r "$CHECK/impersonate" "$APPDIR" && echo unchanged
+   $OCC impersonate:active --unblock    # the command of the app works; impersonations may start
    ```
 
-   When only the last number of the version changes (1.0.2 to 1.0.3), ownCloud takes the new
+   When only the last number of the version changes (1.0.3 to 1.0.4), ownCloud takes the new
    version over by itself at the next request or `occ` command, so `occ upgrade` may answer
    "ownCloud is already latest version" (exit status 3): that is fine. A version whose first or
    second number changes needs `occ upgrade`. Do not switch on the maintenance mode for the upgrade
@@ -158,28 +179,34 @@ shell, in the folder that holds the archive of the new version; replace `/var/ww
    changes it runs but leaves the maintenance mode on.
 
 6. To go back to the backup (only between versions whose first two numbers are the same, e.g. from
-   1.0.3 to 1.0.2):
+   1.0.4 to 1.0.3), block and end the impersonations as in step 3 first, then:
 
    ```bash
-   sudo mv "$APPDIR" /root/impersonate-1.0.3-removed
-   sudo mv /root/impersonate-1.0.2-backup "$APPDIR"
+   sudo mv "$APPDIR" /root/impersonate-1.0.4-removed
+   sudo mv /root/impersonate-1.0.3-backup "$APPDIR"
+   # reload PHP-FPM or Apache as in step 4
    $OCC upgrade                         # "ownCloud is already latest version"
-   $OCC app:list impersonate            # Version: 1.0.2
+   $OCC app:list impersonate            # Version: 1.0.3
    ```
 
    `occ app:list` shows the version that ownCloud has registered, which the first `occ` command
-   after the replacement of the folder updates: run `occ upgrade` before it, as in step 5. Remove
-   the backup once the new version works.
+   after the replacement of the folder updates: run `occ upgrade` before it, as in step 5. Then
+   allow new impersonations again: `$OCC impersonate:active --unblock` (1.0.4 and later); a version
+   before 1.0.4 does not know the block, remove it instead, so that it does not come back with the
+   next upgrade: `$OCC config:app:delete impersonate starts_blocked`. Remove the backup once the
+   version you want works.
 
 ### Uninstall
 
-End the impersonations that are active first: a session that impersonates somebody while the app is
-disabled keeps the impersonated identity without any of the controls of the app. The command also
-takes the background job of the app off the job list.
+Block new impersonations and end the ones that are active first: a session that impersonates
+somebody while the app is disabled keeps the impersonated identity without any of the controls of
+the app. Continue only if the first command ends with exit status 0 (see step 3 of the upgrade); it
+also takes the background job of the app off the job list.
 
 ```bash
-sudo -u www-data php occ impersonate:active --end
+sudo -u www-data php occ impersonate:active --end --block && echo "nothing is active"
 sudo -u www-data php occ app:disable impersonate
+sudo -u www-data php occ config:app:delete impersonate starts_blocked                    # the block
 sudo -u www-data php occ config:app:delete impersonate impersonate_include_groups_list   # optional
 ```
 
@@ -196,10 +223,17 @@ Admin settings → **User Authentication** → **Impersonate Settings**:
 | Allow group admins of specific groups to impersonate the users within those groups | administrators, and group admins of the selected groups: enabled members of those groups (never administrators) |
 | Allow group admins to impersonate members who are group admins themselves (off by default) | with one of the two group admin options: such members become possible targets. They may administer other groups, and the impersonating group admin would act with those rights as well |
 
+The app must be enabled for everybody (`occ app:enable impersonate`): its checks run for every
+request only if ownCloud loads it for every request. ownCloud does not enable an authentication app
+for groups only; should the configuration say so anyway, no impersonation starts (the log and
+`occ impersonate:active` say why).
+
 The group admin options need `'allow_subadmins' => true` (section 2); the admin page shows a hint
 when the feature is disabled. Users who never logged in cannot be impersonated (their file system is
 set up by the first login). Every change of the page is stored by one request that the server
-validates (only existing groups are kept); a group that is deleted leaves the list.
+validates (only existing groups are kept); a group that is deleted leaves the list, and the option
+"Allow group admins to impersonate members who are group admins themselves" is switched off if it
+was given for a list with that group (save the page again to keep it; the log says so).
 
 An impersonation can only be started in the web interface, from a browser session that was logged
 in through the login form: a request that brings credentials of its own (HTTP Basic, an app
@@ -209,16 +243,24 @@ Further settings (app config, set with `occ`):
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `max_duration_minutes` | `60` | An impersonation ends (with a logout) after this many minutes. `0` = no limit; a value that is not a whole number counts as the default |
-| `allow_start_with_credentials` | `false` | `true`: an impersonation may also be started by a request that carries credentials (an `Authorization` header) or from a session such a request created. Only for instances where every request of a browser carries credentials (authentication by a proxy or by the web server): ownCloud does not ask such requests for the CSRF token, and their sessions are not the result of an interactive login |
+| `max_duration_minutes` | `60` | An impersonation ends (with a logout) after this many minutes. Exactly `0` = no limit; any other value that is not a whole number counts as the default |
+| `allow_start_with_credentials` | `false` | `true`: an impersonation may also be started by a request that carries credentials (an `Authorization` header) or from a session such a request created. Only for instances where every request of a browser carries credentials (authentication by a proxy or by the web server): ownCloud does not ask such requests for the CSRF token (the app does: the start still needs the CSRF token of the page), and their sessions are not the result of an interactive login |
 | `forbidden_prefixes` | `[]` | JSON list of path prefixes as the router sees them (without `index.php`), e.g. `["/apps/someapp/"]`: requests below them are refused during an impersonation, in addition to the built-in list (section 4). Use it for installed apps that issue credentials or change how an account is recovered. The admin page shows the prefixes in use and names entries it ignores (anything that is not a plain path) |
+| `starts_blocked` | – | `true` while new impersonations are blocked for maintenance; set and removed by `occ impersonate:active --block` / `--unblock` |
 
 ```bash
 sudo -u www-data php occ config:app:set impersonate max_duration_minutes --value=30
 sudo -u www-data php occ config:app:set impersonate forbidden_prefixes --value='["/apps/someapp/"]'
 sudo -u www-data php occ impersonate:active          # who impersonates whom right now
 sudo -u www-data php occ impersonate:active --end    # end all of them at once
+sudo -u www-data php occ impersonate:active --block  # no new impersonation until --unblock
 ```
+
+`occ impersonate:active` also reports how many impersonations still wait for their cleanup, and for
+how many of them the session token is not yet known to be revoked. With `--end` its exit status is 0 only when afterwards
+nothing is active and no cleanup is open; 1 when an impersonation could not be ended (for example
+because its user cannot be loaded), 3 when a cleanup is still open (the background job retries it),
+2 for `--block` together with `--unblock`.
 
 ## 4. Security
 
@@ -253,8 +295,9 @@ what outlives an impersonation and records it:
 * the impersonation is re-checked on every request and ends when the impersonator is disabled or
   deleted, loses the permission, reaches the maximum duration, or changes the password (the password
   is re-checked for impersonations that were started from a session with a login password; others,
-  e.g. single sign-on sessions, are bounded by the maximum duration). A request whose check cannot be
-  completed is refused;
+  e.g. single sign-on sessions, are bounded by the maximum duration). The request during which it
+  ends is refused (a logout request, `/logout`, is not), and so is a request whose check cannot be
+  completed;
 * only the user's own "Log out" switches back; security logouts end the session, and so does a
   switch that fails half-way.
 
@@ -309,7 +352,15 @@ and builds and publishes the release archive for signed tags.
   ended at all (the start is).
 * If the app is disabled while a session impersonates somebody, that session keeps the impersonated
   identity until it is logged out (the logout is then a normal logout). Run
-  `occ impersonate:active --end` before you disable the app.
+  `occ impersonate:active --end --block` before you disable the app, and continue only on exit
+  status 0. The block stays in the configuration: when you enable the app again, run
+  `occ impersonate:active --unblock`.
+* If the app cannot build its request guard (for example after an update of ownCloud that changes
+  something the app relies on) while an impersonation whose session token may still be valid is
+  recorded, every request to the instance is refused with HTTP 503 and an error is logged: the
+  guard cannot tell whether a request presents that token. Fix the cause; before you disable the app
+  instead, run `occ impersonate:active --end` if it still works (the recorded token would work
+  without the app's checks). No impersonation starts while the guard is not active.
 * Server-side encryption: the app is tested without encryption and with master-key encryption, which
   is what `occ encryption:enable` sets up on ownCloud 11.1. Per-user keys, which an instance that was
   upgraded from an older version may still use, are not tested: there the files of the impersonated
@@ -318,8 +369,10 @@ and builds and publishes the release archive for signed tags.
 * Group ids that contain the character `|` cannot be selected or removed in the admin page (the
   group picker of ownCloud uses it as a separator). The page shows them and keeps them in the list;
   change them with `occ config:app:set impersonate impersonate_include_groups_list`.
-* While an impersonation is active, every request to the instance costs one or two additional token
-  lookups (the check that the session token of the impersonation is not used elsewhere).
+* While an impersonation is recorded – until it has ended and its session token is known to be
+  revoked – the credentials and up to 256 request values of every request to the instance that have
+  the shape of a session id are looked up as tokens (the check that the session token of an
+  impersonation is not used elsewhere); a request with more such values is refused with HTTP 503.
 * Translations: the user interface is translated into every language of ownCloud 11.1. The Polish
   translation was reviewed by the maintainer; the others were made with AI assistance (translation,
   review with a back-translation, adversarial review; CHANGELOG.md, 1.0.3) and have not been
@@ -342,10 +395,14 @@ advisory check of its dependencies, remediation of every accepted finding that c
 the plugin in release 1.0.1, a verification of these fixes that led to release 1.0.2; see
 [CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md)). Release 1.0.3 adds translations,
 updates the QA tools and fixes how a refusal is shown behind nginx; it does not change what the
-review covered (an independent review of its changes was part of the release). The
-review covered the code of this plugin only: ownCloud itself, other apps and the configuration of
-your instance were not part of it. An automated review is not a certification: report anything it
-missed as described in SECURITY.md.
+review covered (an independent review of its changes was part of the release). Release 1.0.4 is
+the result of a further full review of 1.0.3 on 2026-11-28 (no vulnerability of critical, high or
+medium risk; twelve of low risk and nineteen observations, mostly in failure paths, maintenance
+procedures and the release tooling): every finding that can be fixed within the plugin is fixed
+and tested on ownCloud 11.1.0 (SQLite, MariaDB with Apache, PostgreSQL with nginx). The
+reviews covered the code of this plugin only: ownCloud itself, other apps and the configuration of
+your instance were not part of them. An automated review is not a certification: report anything
+they missed as described in SECURITY.md.
 
 ## 8. License
 

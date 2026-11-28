@@ -330,4 +330,65 @@ class CredentialCleanupTest extends TestCase {
 		$this->assertNull($cleanup->findToken('something else'));
 		$this->assertNull($cleanup->findToken(''));
 	}
+
+	public function testAListThatMayHaveBeenCutOffIsNoCompleteCleanup(): void {
+		// The platform lists at most 1000 tokens: what it did not list was not examined. The
+		// cleanup is not done (the record stays and is retried), and no ceiling is taken from such
+		// a list - unseen tokens of the impersonation may lie above it.
+		for ($id = 1; $id <= 1000; $id++) {
+			$this->token($id, IToken::TEMPORARY_TOKEN, true, 'session');
+		}
+		$this->token(2000, IToken::PERMANENT_TOKEN, false, 'minted');
+		$result = $this->cleanup->run($this->alice, 1500, true, 'admin');
+		$this->assertSame([2000], $this->revoked, 'what was listed is revoked');
+		$this->assertSame(['tokens' => false, 'signingKey' => true, 'ceiling' => null], $result);
+		// a ceiling an earlier run found stays as it is
+		$this->token(2001, IToken::PERMANENT_TOKEN, false, 'later');
+		$this->assertSame(['tokens' => false, 'signingKey' => true, 'ceiling' => 1999], $this->cleanup->run($this->alice, 1500, true, 'admin', 1999));
+	}
+
+	public function testTheNameOfARevokedTokenIsWrittenAsPlainText(): void {
+		// the name is free text of whoever created the token: no line breaks or control characters
+		// reach the log, the event or the notification, and its length is limited
+		$this->token(70, IToken::PERMANENT_TOKEN, false, "evil\nname\r\x07with\u{2028}breaks " . \str_repeat('x', 300));
+		$this->logger->expects($this->once())->method('warning')->with(
+			$this->anything(),
+			$this->callback(function (array $context) {
+				return \strpos($context['name'], 'evil name with breaks x') === 0 && \mb_strlen($context['name']) <= 120;
+			})
+		);
+		$this->auditTrail->expects($this->once())->method('credentialRevoked')->with(
+			'alice',
+			$this->callback(function (string $name) {
+				return \preg_match('/[\x00-\x1F\x7F]|\x{2028}/u', $name) === 0 && \mb_strlen($name) <= 120;
+			}),
+			'admin',
+			Notifier::CREDENTIAL_APP_PASSWORD,
+			// every revocation gets a notification object of its own
+			70
+		);
+		$this->cleanup->run($this->alice, 60, true, 'admin');
+	}
+
+	public static function printableProvider(): array {
+		return [
+			['My phone', 'My phone'],
+			["two\nlines", 'two lines'],
+			["\x00\x01tab\tbed\x7F", 'tab bed'],
+			["Unicode line\u{2028}separator\u{85}next", 'Unicode line separator next'],
+			// not valid UTF-8: still a string that can be written anywhere
+			["broken \xC3\x28 utf-8", 'broken ?( utf-8'],
+			['Zażółć gęślą jaźń', 'Zażółć gęślą jaźń'],
+			// invisible format characters: a direction override, zero-width characters
+			["phone\u{202E}txt.exe\u{200B}\u{FEFF}", 'phonetxt.exe'],
+			[\str_repeat('ä', 200), \str_repeat('ä', 120)],
+		];
+	}
+
+	/**
+	 * @dataProvider printableProvider
+	 */
+	public function testPrintable(string $name, string $expected): void {
+		$this->assertSame($expected, CredentialCleanup::printable($name));
+	}
 }

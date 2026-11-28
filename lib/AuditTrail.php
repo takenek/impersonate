@@ -29,6 +29,11 @@ use Symfony\Component\EventDispatcher\GenericEvent;
  * - user.afterimpersonatelogout            an impersonation ended, with the reason
  * - user.impersonate.credentialrevoked     the cleanup revoked a credential of the impersonated user
  *
+ * Start and end carry the argument "impersonation": the id of the server side record
+ * (ActiveImpersonations), the same for the start and the end of one impersonation, so that an
+ * audit app can pair them (it is no credential). It is missing where a session was switched by a
+ * version without records.
+ *
  * A failing consumer must never change the outcome of the switch that already
  * happened, so every dispatch is isolated.
  */
@@ -50,15 +55,20 @@ class AuditTrail {
 		$this->logger = $logger;
 	}
 
-	public function started(string $impersonatorUid, string $targetUid): void {
-		$this->dispatch(self::EVENT_START, ['impersonator' => $impersonatorUid, 'targetUser' => $targetUid]);
+	public function started(string $impersonatorUid, string $targetUid, ?string $impersonationId = null): void {
+		$arguments = ['impersonator' => $impersonatorUid, 'targetUser' => $targetUid];
+		if ($impersonationId !== null) {
+			$arguments['impersonation'] = $impersonationId;
+		}
+		$this->dispatch(self::EVENT_START, $arguments);
 	}
 
-	public function ended(string $impersonatorUid, string $targetUid, string $reason): void {
-		$this->dispatch(
-			self::EVENT_END,
-			['impersonator' => $impersonatorUid, 'targetUser' => $targetUid, 'reason' => $reason]
-		);
+	public function ended(string $impersonatorUid, string $targetUid, string $reason, ?string $impersonationId = null): void {
+		$arguments = ['impersonator' => $impersonatorUid, 'targetUser' => $targetUid, 'reason' => $reason];
+		if ($impersonationId !== null) {
+			$arguments['impersonation'] = $impersonationId;
+		}
+		$this->dispatch(self::EVENT_END, $arguments);
 	}
 
 	/**
@@ -69,12 +79,15 @@ class AuditTrail {
 	 * @param string $name name of the app password or of the session (empty for the URL signing key)
 	 * @param string $kind Notifier::CREDENTIAL_*: what it is, so that the notification can say it in
 	 *                     the language of the owner
+	 * @param int|null $tokenId id of the revoked token (null for the URL signing key): every
+	 *                          revocation gets a notification object of its own
 	 */
 	public function credentialRevoked(
 		string $targetUid,
 		string $name,
 		?string $impersonatorUid,
-		string $kind = Notifier::CREDENTIAL_APP_PASSWORD
+		string $kind = Notifier::CREDENTIAL_APP_PASSWORD,
+		?int $tokenId = null
 	): void {
 		// what the event calls the credential (as in version 1.0.1, consumers may rely on it)
 		if ($kind === Notifier::CREDENTIAL_SIGNING_KEY) {
@@ -93,7 +106,13 @@ class AuditTrail {
 			$notification->setApp('impersonate')
 				->setUser($targetUid)
 				->setDateTime(new \DateTime())
-				->setObject('credential', \substr(\sha1($targetUid . "\0" . $credential), 0, 32))
+				// two credentials of the same name are two notifications (the notifications app may
+				// treat notifications with the same object as one)
+				->setObject('credential', \substr(\sha1(\implode("\0", [
+					$targetUid,
+					$credential,
+					$tokenId !== null ? 'token ' . $tokenId : 'at ' . \microtime(true),
+				])), 0, 32))
 				->setSubject(Notifier::SUBJECT_CREDENTIAL_REVOKED, [$name, $kind]);
 			$this->notificationManager->notify($notification);
 		} catch (\Throwable $e) {

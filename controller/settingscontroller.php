@@ -2,8 +2,8 @@
 /**
  * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
  * Maintained by Marek Królikowski (TaKeN): https://github.com/takenek/impersonate
- * Modified on 2026-11-26 and 2026-11-27 by Marek Królikowski (TaKeN): ownCloud 11.1 support and
- * security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
+ * Modified on 2026-11-26, 2026-11-27 and 2026-11-28 by Marek Królikowski (TaKeN): ownCloud 11.1
+ * support and security hardening, see CHANGELOG.md. SPDX-License-Identifier: AGPL-3.0-only
  * See LICENSE and COPYRIGHT.
  *
  * Based on the ownCloud "impersonate" app (https://github.com/owncloud/impersonate):
@@ -20,6 +20,7 @@
 namespace OCA\Impersonate\Controller;
 
 use OCA\Impersonate\AuditTrail;
+use OCA\Impersonate\ImpersonationGuard;
 use OCA\Impersonate\Policy;
 use OCA\Impersonate\RefusedException;
 use OCA\Impersonate\Util;
@@ -50,6 +51,8 @@ class SettingsController extends Controller {
 	private $util;
 	/** @var AuditTrail */
 	private $auditTrail;
+	/** @var ImpersonationGuard */
+	private $guard;
 
 	public function __construct(
 		$appName,
@@ -61,7 +64,8 @@ class SettingsController extends Controller {
 		IL10N $l10n,
 		Policy $policy,
 		Util $util,
-		AuditTrail $auditTrail
+		AuditTrail $auditTrail,
+		ImpersonationGuard $guard
 	) {
 		parent::__construct($appName, $request);
 		$this->userManager = $userManager;
@@ -72,6 +76,7 @@ class SettingsController extends Controller {
 		$this->policy = $policy;
 		$this->util = $util;
 		$this->auditTrail = $auditTrail;
+		$this->guard = $guard;
 	}
 
 	/**
@@ -100,8 +105,9 @@ class SettingsController extends Controller {
 				'[]',
 			]);
 		}
-		if ($this->policy->isDelegatedGroupAdmin($currentUser)) {
-			$groups = $this->policy->getImpersonableGroupIds($currentUser);
+		// a group admin none of whose groups is delegated can not impersonate anybody: the empty answer
+		$groups = $this->policy->isDelegatedGroupAdmin($currentUser) ? $this->policy->getImpersonableGroupIds($currentUser) : [];
+		if ($groups !== []) {
 			return new JSONResponse([
 				\json_encode($groups),
 				$this->policy->isIncludeGroupsMode() ? 'true' : 'false',
@@ -131,12 +137,30 @@ class SettingsController extends Controller {
 	 * @return JSONResponse
 	 */
 	public function impersonate($target) {
-		if ($this->config->getAppValue('impersonate', 'enabled', 'no') === 'no') {
-			$this->logger->warning('Impersonation refused: the app is not enabled', ['app' => 'impersonate']);
+		// The checks of the app run for every request only if the app is loaded for every request:
+		// an app that is enabled for some groups only would not be loaded for the session of an
+		// impersonated user outside those groups.
+		$enabled = $this->config->getAppValue('impersonate', 'enabled', 'no');
+		if ($enabled !== 'yes') {
+			$this->logger->warning(
+				$enabled === 'no'
+					? 'Impersonation refused: the app is not enabled'
+					: 'Impersonation refused: the app is not enabled for everybody (it must not be limited to groups)',
+				['app' => 'impersonate']
+			);
 			return $this->error(
 				Policy::ERROR_CANNOT_IMPERSONATE,
 				$this->l->t('Can not impersonate. Please contact your server administrator to allow impersonation.')
 			);
+		}
+		// No impersonation without the guard (ImpersonationGuard::onLoadedApps()) that checks every
+		// request of it: if it did not see this request, it will not see the next ones either.
+		if (!$this->guard->isActiveForThisRequest()) {
+			$this->logger->error(
+				'Impersonation refused: the request guard of the app is not active (see the ownCloud log for the cause)',
+				['app' => 'impersonate']
+			);
+			return $this->error(Policy::ERROR_CANNOT_IMPERSONATE, $this->l->t('Can not impersonate'));
 		}
 
 		$currentUser = $this->userSession->getUser();
@@ -169,6 +193,17 @@ class SettingsController extends Controller {
 			return $this->error(Policy::ERROR_CANNOT_IMPERSONATE, $this->l->t('Can not impersonate'));
 		}
 
+		// Whatever authenticated the request: the start is a deliberate action in the user
+		// interface, which always sends the CSRF token. The platform does not ask a request that
+		// carries credentials for it, which allow_start_with_credentials lets through above.
+		if (!$this->request->passesCSRFCheck()) {
+			$this->logger->warning(
+				'Impersonation by "{impersonator}" refused: the request has no valid CSRF token',
+				['app' => 'impersonate', 'impersonator' => $impersonator]
+			);
+			return $this->error(Policy::ERROR_CANNOT_IMPERSONATE, $this->l->t('Can not impersonate'));
+		}
+
 		// Decide whether the user may impersonate at all before looking at the
 		// target, so that nothing about other accounts is revealed.
 		if (!$this->policy->mayImpersonateAnyone($currentUser)) {
@@ -178,6 +213,25 @@ class SettingsController extends Controller {
 			);
 			return $this->error(Policy::ERROR_CANNOT_IMPERSONATE, $this->l->t('Can not impersonate'));
 		}
+		// new impersonations are blocked for a maintenance window (occ impersonate:active --block);
+		// told only to users who may impersonate
+		try {
+			$blocked = $this->util->areStartsBlocked();
+		} catch (\Throwable $e) {
+			$this->logger->logException($e, ['app' => 'impersonate']);
+			return $this->error(Policy::ERROR_CANNOT_IMPERSONATE, $this->l->t('Can not impersonate'));
+		}
+		if ($blocked) {
+			$this->logger->warning(
+				'Impersonation by "{impersonator}" refused: new impersonations are blocked (occ impersonate:active --unblock)',
+				['app' => 'impersonate', 'impersonator' => $impersonator]
+			);
+			return $this->error(
+				Policy::ERROR_CANNOT_IMPERSONATE,
+				$this->l->t('Can not impersonate. Please contact your server administrator to allow impersonation.')
+			);
+		}
+
 		$isAdmin = $this->policy->isAdmin($currentUser);
 
 		$user = \is_string($target) && $target !== '' ? $this->userManager->get($target) : null;
@@ -247,7 +301,7 @@ class SettingsController extends Controller {
 			]
 		);
 		// the switch has happened: a failing event consumer does not change the answer
-		$this->auditTrail->started($impersonator, $targetUid);
+		$this->auditTrail->started($impersonator, $targetUid, $this->util->getRecordId());
 		return new JSONResponse();
 	}
 

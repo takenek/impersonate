@@ -34,6 +34,8 @@ use OCA\Impersonate\RefusedException;
 use OCA\Impersonate\Tests\Unit\Support\ArraySession;
 use OCA\Impersonate\Util;
 use OCP\BackgroundJob\IJobList;
+use OCP\DB\QueryBuilder\IExpressionBuilder;
+use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IConfig;
 use OCP\IDBConnection;
 use OCP\ILogger;
@@ -81,8 +83,10 @@ class UtilTest extends TestCase {
 	private $allowStartWithCredentials = false;
 	/** @var array<string, string> user values "uid/app/key" */
 	private $userValues = [];
-	/** @var array<string, string> app values of the app "impersonate" */
+	/** @var array<string, string> app values of the app "impersonate" (the database has the same) */
 	private $appValues = [];
+	/** @var \Throwable|null what the database throws when it is asked (ActiveImpersonations::allFresh()) */
+	private $databaseDown;
 	/** @var Util */
 	private $util;
 	/** @var IUser|null user the (mocked) user session currently holds */
@@ -210,11 +214,43 @@ class UtilTest extends TestCase {
 		});
 		$this->jobList = $this->createMock(IJobList::class);
 		$auditTrail = new AuditTrail($eventDispatcher, $notificationManager, $this->logger);
+		// what the registry reads from the database is what the app config holds
+		$query = $this->createMock(IQueryBuilder::class);
+		foreach (['select', 'addSelect', 'from', 'where'] as $method) {
+			$query->method($method)->willReturnSelf();
+		}
+		$query->method('expr')->willReturn($this->createMock(IExpressionBuilder::class));
+		$query->method('execute')->willReturnCallback(function () {
+			if ($this->databaseDown !== null) {
+				throw $this->databaseDown;
+			}
+			$rows = [];
+			foreach ($this->appValues as $key => $value) {
+				$rows[] = ['configkey' => $key, 'configvalue' => $value];
+			}
+			return new class($rows) {
+				/** @var array */
+				private $rows;
+
+				public function __construct(array $rows) {
+					$this->rows = $rows;
+				}
+
+				public function fetchAllAssociative(): array {
+					return $this->rows;
+				}
+
+				public function free(): void {
+				}
+			};
+		});
+		$connection = $this->createMock(IDBConnection::class);
+		$connection->method('getQueryBuilder')->willReturn($query);
 		$this->registry = new ActiveImpersonations(
 			$this->config,
 			$this->secureRandom,
 			$this->jobList,
-			$this->createMock(IDBConnection::class),
+			$connection,
 			$this->logger
 		);
 		$this->policy = $this->createMock(Policy::class);
@@ -508,7 +544,7 @@ class UtilTest extends TestCase {
 		}
 		$this->assertNull($this->record(), 'the record is closed');
 		$this->assertSame(
-			[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => Util::REASON_RETURNED]],
+			[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => Util::REASON_RETURNED, 'impersonation' => self::RECORD]],
 			$this->events(AuditTrail::EVENT_END),
 			'the end is announced exactly once'
 		);
@@ -569,7 +605,7 @@ class UtilTest extends TestCase {
 			$this->assertSame([], $this->events(AuditTrail::EVENT_END), 'it was announced where it was closed');
 		} else {
 			$this->assertSame(
-				[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => Util::REASON_SWITCH_BACK_FAILED]],
+				[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => Util::REASON_SWITCH_BACK_FAILED, 'impersonation' => self::RECORD]],
 				$this->events(AuditTrail::EVENT_END)
 			);
 		}
@@ -594,7 +630,7 @@ class UtilTest extends TestCase {
 		$this->assertNull($this->session->get(Util::SESSION_PRIVATE_KEY));
 		$this->assertNull($this->record());
 		$this->assertSame(
-			[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => Util::REASON_SWITCH_BACK_FAILED]],
+			[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => Util::REASON_SWITCH_BACK_FAILED, 'impersonation' => self::RECORD]],
 			$this->events(AuditTrail::EVENT_END)
 		);
 	}
@@ -671,7 +707,7 @@ class UtilTest extends TestCase {
 		$this->assertNull($this->session->get(Util::SESSION_PRIVATE_KEY));
 		$this->assertNull($this->record());
 		$this->assertSame(
-			[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => 'the reason']],
+			[['impersonator' => 'admin', 'targetUser' => 'alice', 'reason' => 'the reason', 'impersonation' => self::RECORD]],
 			$this->events(AuditTrail::EVENT_END)
 		);
 
@@ -1056,5 +1092,108 @@ class UtilTest extends TestCase {
 	public function testImpersonationTokenName(): void {
 		$this->assertSame('Impersonated by admin', Util::impersonationTokenName('admin'));
 		$this->assertSame(120, \mb_strlen(Util::impersonationTokenName(\str_repeat('x', 200))));
+	}
+
+	public function testAStartThatIsBlockedMeanwhileIsRolledBack(): void {
+		// occ impersonate:active --block ran after the controller looked: the record that exists now is
+		// either seen by the occ command or the block is seen here
+		$admin = $this->loggedInAdmin();
+		$this->appValues['starts_blocked'] = 'true';
+		$this->assertTrue($this->util->areStartsBlocked());
+		$this->userSession->expects($this->once())->method('logout');
+		try {
+			$this->util->startImpersonation($this->user('alice'), $admin);
+			$this->fail('exception expected');
+		} catch (\RuntimeException $e) {
+			$this->assertInstanceOf(RefusedException::class, $e->getPrevious());
+		}
+		$this->assertFalse($this->util->isImpersonating());
+		$this->assertArrayNotHasKey('session-2', $this->tokens, 'the half switched session has no valid token');
+		$this->assertNull($this->record(), 'nothing is left of it');
+		$this->assertSame([], $this->events(AuditTrail::EVENT_END));
+	}
+
+	public function testWithoutTheListOfTheOtherImpersonationsNothingIsRevoked(): void {
+		// which sessions belong to other impersonations of the same user can not be read: the cleanup
+		// waits for the reconcile job (which reads them itself) instead of guessing
+		$admin = $this->loggedInAdmin();
+		$alice = $this->user('alice');
+		$this->impersonating($admin, $alice);
+		$tokenId = $this->tokens['session-2']->getId();
+		$minted = $this->addToken('minted', 'alice', 'alice', null, 'evil', IToken::PERMANENT_TOKEN);
+		$this->databaseDown = new \RuntimeException('database down');
+
+		$this->util->endImpersonation('logout');
+
+		$this->assertContains($minted, $this->tokens, 'nothing but the token of the impersonation is revoked now');
+		$this->assertSame([['alice', $tokenId]], $this->revokedById);
+		$record = $this->record();
+		$this->assertNotNull($record, 'the record waits for the retry');
+		$this->assertTrue($record['pending']);
+		$this->assertTrue($record['tokenRevoked'], '... and knows that the session token is gone');
+		$this->assertArrayNotHasKey('ceiling', $record);
+	}
+
+	public function testAfterAnEndElsewhereTheCleanupStaysBelowTheCeilingOfTheRecord(): void {
+		// The job ended the impersonation but could not revoke everything; its record waits for a retry
+		// with the ceiling the job found. Whether the session token was still valid when this session
+		// ends the impersonation can not be told: the cleanup runs, but does not touch what the
+		// account owner created after the end there.
+		$admin = $this->loggedInAdmin();
+		$alice = $this->user('alice');
+		$this->impersonating($admin, $alice);
+		$record = $this->record();
+		$during = $this->addToken('minted-during', 'alice', 'alice', null, 'evil', IToken::PERMANENT_TOKEN);
+		$this->registry->markPending(self::RECORD, $record, \time() - 60, $during->getId());
+		$ownLater = $this->addToken('alice-own-later', 'alice', 'alice', null, 'Own', IToken::PERMANENT_TOKEN);
+		$failing = $this->createMock(DefaultTokenProvider::class);
+		$failing->method('getTokenByUser')->willReturnOnConsecutiveCalls(
+			$this->throwException(new \RuntimeException('token backend down')),
+			\array_values(\array_filter($this->tokens, function (DefaultToken $t) {
+				return $t->getUID() === 'alice';
+			})),
+			[]
+		);
+		$failing->method('invalidateTokenById')->willReturnCallback(function (IUser $user, $id) {
+			$this->revokedById[] = [$user->getUID(), $id];
+		});
+		$failing->method('getToken')->willThrowException(new InvalidTokenException());
+		$auditTrail = new AuditTrail($this->createMock(EventDispatcherInterface::class), $this->createMock(IManager::class), $this->logger);
+		$util = new Util(
+			$this->session,
+			$this->userSession,
+			$failing,
+			$this->userManager,
+			$this->secureRandom,
+			$this->csrfTokenManager,
+			$this->logger,
+			$this->config,
+			$this->registry,
+			new CredentialCleanup($failing, $this->config, $auditTrail, $this->logger),
+			$auditTrail,
+			$this->policy
+		);
+
+		$util->endImpersonation('logout');
+
+		$revoked = \array_column($this->revokedById, 1);
+		$this->assertContains($during->getId(), $revoked, 'what appeared during the impersonation is revoked');
+		$this->assertNotContains($ownLater->getId(), $revoked, 'what the owner created after the end is not');
+	}
+
+	public function testAStartWhoseBlockCanNotBeReadIsRolledBack(): void {
+		// whether new impersonations are blocked can not be told after the record exists: no start
+		$admin = $this->loggedInAdmin();
+		$this->userSession->expects($this->once())->method('logout');
+		$this->databaseDown = new \RuntimeException('database down');
+		try {
+			$this->util->startImpersonation($this->user('alice'), $admin);
+			$this->fail('exception expected');
+		} catch (\RuntimeException $e) {
+			$this->assertSame('database down', $e->getPrevious()->getMessage());
+		}
+		$this->assertFalse($this->util->isImpersonating());
+		$this->assertArrayNotHasKey('session-2', $this->tokens);
+		$this->assertNull($this->record());
 	}
 }

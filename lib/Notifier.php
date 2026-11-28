@@ -55,7 +55,9 @@ class Notifier implements INotifier {
 			throw new \InvalidArgumentException('Unknown notification');
 		}
 		$parameters = $notification->getSubjectParameters();
-		$name = isset($parameters[0]) ? (string)$parameters[0] : '';
+		// as CredentialCleanup writes it since 1.0.4 (a notification stored by an earlier version may
+		// hold the name as its client gave it)
+		$name = isset($parameters[0]) ? CredentialCleanup::printable((string)$parameters[0]) : '';
 		// A notification that version 1.0.1 stored has no kind: its first parameter is the whole
 		// label ("session <name>", "URL signing key") and gets the general text.
 		$kind = isset($parameters[1]) ? (string)$parameters[1] : self::CREDENTIAL_APP_PASSWORD;

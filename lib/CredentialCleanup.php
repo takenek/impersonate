@@ -45,14 +45,18 @@ use OCP\IUser;
  * created from a session without a login password, such a session itself,
  * e.g. after single sign-on). The owner is notified and an event is
  * dispatched for each (AuditTrail::credentialRevoked).
- * Once the tokens could be listed after the end, later tokens are out of reach
- * ("ceiling"), however often the cleanup has to be retried.
+ * Once the tokens could be listed after the end with nothing left to revoke,
+ * later tokens are out of reach ("ceiling"), however often the cleanup has to
+ * be retried; a retry after a failed revocation looks at everything up to the
+ * retry again.
  */
 class CredentialCleanup {
 	/** the platform may not list more tokens of a user than this */
 	private const TOKEN_LIST_LIMIT = 1000;
 	/** how often the tokens are listed again while a pass still finds something to revoke */
 	private const MAX_PASSES = 4;
+	/** how much of a name given by a client is written to the log, the event and the notification */
+	private const NAME_LENGTH = 120;
 
 	/** @var DefaultTokenProvider */
 	private $tokenProvider;
@@ -83,21 +87,28 @@ class CredentialCleanup {
 	 * @param int[] $keep ids of tokens that are left alone whatever they look like: the session
 	 *                    tokens of other impersonations of the same user
 	 * @return array{tokens: bool, signingKey: bool, ceiling: int|null} what is done (false: failed,
-	 *                          to be retried) and the ceiling for later runs (null: the tokens could
-	 *                          not be listed)
+	 *                          to be retried; also when the platform may not have listed every
+	 *                          token of the user) and the ceiling for later runs (null: the tokens
+	 *                          could not be listed)
 	 */
 	public function run(IUser $target, int $watermark, bool $signingKeyExisted, ?string $impersonatorUid, ?int $ceiling = null, array $keep = []): array {
 		$tokensDone = true;
+		// every token of the user was in the listings (a full list may have been cut off)
+		$complete = true;
 		try {
 			// A session that is revoked here may have created another one meanwhile: the
 			// tokens are listed again until a pass finds nothing to revoke.
 			for ($pass = 0; $pass < self::MAX_PASSES; $pass++) {
 				$tokens = $this->tokenProvider->getTokenByUser($target);
-				if ($pass === 0 && \count($tokens) >= self::TOKEN_LIST_LIMIT) {
-					$this->logger->error(
-						'User "{target}" has so many tokens that the cleanup after the impersonation by "{impersonator}" may not have seen all of them: check the app passwords of that user',
-						['app' => 'impersonate', 'target' => $target->getUID(), 'impersonator' => $impersonatorUid]
-					);
+				if (\count($tokens) >= self::TOKEN_LIST_LIMIT) {
+					if ($complete) {
+						$this->logger->error(
+							'User "{target}" has so many tokens that the cleanup after the impersonation by "{impersonator}" may not have seen all of them: check the app passwords of that user',
+							['app' => 'impersonate', 'target' => $target->getUID(), 'impersonator' => $impersonatorUid]
+						);
+					}
+					// not done: the record stays (it is retried and shown by occ impersonate:active)
+					$complete = false;
 				}
 				$highest = $watermark;
 				foreach ($tokens as $token) {
@@ -135,8 +146,11 @@ class CredentialCleanup {
 					break;
 				}
 				if ($ceiling !== null || $revoked === []) {
-					// a given ceiling does not move; otherwise it is what the last listing showed
-					$ceiling = $ceiling ?? $highest;
+					// A given ceiling does not move; otherwise it is what the last listing showed -
+					// unless a listing may have been cut off: unseen tokens can lie above it.
+					if ($ceiling === null && $complete) {
+						$ceiling = $highest;
+					}
 					break;
 				}
 			}
@@ -149,6 +163,7 @@ class CredentialCleanup {
 			$this->logger->logException($e, ['app' => 'impersonate']);
 			$tokensDone = false;
 		}
+		$tokensDone = $tokensDone && $complete;
 
 		$signingKeyDone = true;
 		if (!$signingKeyExisted) {
@@ -174,7 +189,8 @@ class CredentialCleanup {
 	 */
 	private function announce(IUser $target, DefaultToken $token, ?string $impersonatorUid): void {
 		$isAppPassword = (int)$token->getType() === IToken::PERMANENT_TOKEN;
-		$name = (string)$token->getName();
+		// the name is free text of whoever created the token (for a session: what its client sent)
+		$name = self::printable((string)$token->getName());
 		$this->logger->warning(
 			$isAppPassword
 				? 'Revoked passwordless app password "{name}" of user "{target}" created during the impersonation by "{impersonator}"'
@@ -190,8 +206,23 @@ class CredentialCleanup {
 			$target->getUID(),
 			$name,
 			$impersonatorUid,
-			$isAppPassword ? Notifier::CREDENTIAL_APP_PASSWORD : Notifier::CREDENTIAL_SESSION
+			$isAppPassword ? Notifier::CREDENTIAL_APP_PASSWORD : Notifier::CREDENTIAL_SESSION,
+			(int)$token->getId()
 		);
+	}
+
+	/**
+	 * A name given by a client, as it is written to the log, dispatched with the event and put
+	 * into the notification of the account owner: valid UTF-8, without control characters or line
+	 * separators (a log line stays one line), without invisible format characters (direction
+	 * overrides, zero-width characters: what is shown is what is there), at most NAME_LENGTH
+	 * characters. Whatever renders it still has to treat it as text.
+	 */
+	public static function printable(string $name): string {
+		$name = \mb_scrub($name, 'UTF-8');
+		$name = (string)\preg_replace('/\p{Cf}+/u', '', $name);
+		$name = (string)\preg_replace('/[\x00-\x1F\x7F\x{80}-\x{9F}\x{2028}\x{2029}]+/u', ' ', $name);
+		return \trim(\mb_substr($name, 0, self::NAME_LENGTH, 'UTF-8'));
 	}
 
 	/**

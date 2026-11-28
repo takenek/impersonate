@@ -23,8 +23,10 @@ use OCA\Impersonate\ImpersonationGuard;
 use OCA\Impersonate\Policy;
 use OCA\Impersonate\Reconciler;
 use OCA\Impersonate\Util;
+use OCP\IConfig;
 use OCP\ILogger;
 use OCP\IRequest;
+use OCP\ISession;
 use OCP\IUser;
 use OCP\IUserManager;
 use OCP\IUserSession;
@@ -78,6 +80,7 @@ class ImpersonationGuardTest extends TestCase {
 		$_SERVER = $this->serverBackup;
 		$_GET = [];
 		$_POST = [];
+		\OC_User::setIncognitoMode(false);
 		parent::tearDown();
 	}
 
@@ -675,8 +678,9 @@ class ImpersonationGuardTest extends TestCase {
 		$this->assertSame(ImpersonationGuard::UNVERIFIED, $this->guard->check());
 	}
 
-	public function testCheckProceedsAfterAnImpersonationWasEnded(): void {
-		// the request goes on as an anonymous one
+	public function testARequestWhoseImpersonationWasEndedByTheCheckIsRefused(): void {
+		// What the rest of the request would do must not depend on how the platform reads the
+		// identity after the logout (web interface, OCS, WebDAV): it is refused.
 		$this->util->method('isImpersonating')->willReturn(true);
 		$this->util->method('getImpersonatorUid')->willReturn('admin');
 		$this->util->method('getTargetUid')->willReturn('alice');
@@ -686,7 +690,250 @@ class ImpersonationGuardTest extends TestCase {
 		$this->util->expects($this->once())->method('endImpersonation');
 		$this->userSession->expects($this->once())->method('logout');
 		$this->request('GET', '/apps/files/');
+		$this->assertSame(ImpersonationGuard::ENDED, $this->guard->check());
+	}
+
+	public function testTheLogoutGoesOnAfterItsImpersonationWasEndedByTheCheck(): void {
+		$this->util->method('isImpersonating')->willReturn(true);
+		$this->util->method('getImpersonatorUid')->willReturn('admin');
+		$this->util->method('getTargetUid')->willReturn('alice');
+		$this->policy->method('getExtraForbiddenPrefixes')->willReturn([]);
+		$this->userSession->method('getUser')->willReturn($this->user('alice'));
+		$this->userManager->method('get')->willReturn(null);
+		$this->util->expects($this->once())->method('endImpersonation');
+		$this->request('GET', '//logout/');
 		$this->assertSame(ImpersonationGuard::PROCEED, $this->guard->check());
+	}
+
+	public static function incognitoProvider(): array {
+		return [
+			'ended elsewhere' => [true, true, false, Util::REASON_ENDED_ELSEWHERE],
+			'not bound to its token' => [false, false, false, Util::REASON_OTHER_SESSION],
+			'maximum duration reached' => [false, true, true, 'the maximum duration of the impersonation was reached'],
+			'nothing to decide without the users' => [false, true, false, null],
+		];
+	}
+
+	/**
+	 * Core hides the user of the session (e.g. an update is pending): what needs no user is still
+	 * decided.
+	 *
+	 * @dataProvider incognitoProvider
+	 */
+	public function testInIncognitoModeWhatNeedsNoUserIsStillChecked(bool $endedElsewhere, bool $bound, bool $tooLong, ?string $reason): void {
+		\OC_User::setIncognitoMode(true);
+		$this->util->method('getImpersonatorUid')->willReturn('admin');
+		$this->util->method('getTargetUid')->willReturn('alice');
+		$this->util->method('getStartTime')->willReturn(1700000000);
+		$this->endedElsewhere = $endedElsewhere;
+		$this->bound = $bound;
+		$this->policy->method('hasExceededMaxDuration')->with(1700000000)->willReturn($tooLong);
+		// the users are not asked
+		$this->userSession->expects($this->never())->method('getUser');
+		$this->userManager->expects($this->never())->method('get');
+		if ($reason === null) {
+			$this->util->expects($this->never())->method('endImpersonation');
+			$this->assertTrue($this->guard->validate());
+		} else {
+			$this->util->expects($this->once())->method('endImpersonation')->with($reason);
+			$this->userSession->expects($this->once())->method('logout');
+			$this->assertFalse($this->guard->validate());
+		}
+	}
+
+	/**
+	 * @return ISession|MockObject
+	 */
+	private function sessionOf(?string $impersonator) {
+		$session = $this->createMock(ISession::class);
+		$session->method('get')->willReturnCallback(function ($key) use ($impersonator) {
+			return $key === Util::SESSION_IMPERSONATOR ? $impersonator : null;
+		});
+		return $session;
+	}
+
+	/**
+	 * @param array<string, string> $values app values of the app
+	 * @return IConfig|MockObject
+	 */
+	private function configWith(array $values) {
+		$config = $this->createMock(IConfig::class);
+		$config->method('getAppKeys')->willReturn(\array_keys($values));
+		$config->method('getAppValue')->willReturnCallback(function ($app, $key, $default = '') use ($values) {
+			return $values[$key] ?? $default;
+		});
+		return $config;
+	}
+
+	public static function withoutGuardProvider(): array {
+		$record = \json_encode(self::RECORD);
+		return [
+			'nothing recorded' => [null, ['enabled' => 'yes'], ImpersonationGuard::PROCEED],
+			'the session impersonates' => ['admin', [], ImpersonationGuard::UNVERIFIED],
+			'an impersonation is recorded' => [null, ['active_aaaaaaaaaaaaaaaa' => $record], ImpersonationGuard::UNVERIFIED],
+			'its token may still be valid' => [null, ['active_aaaaaaaaaaaaaaaa' => \json_encode(self::RECORD + ['pending' => true, 'ended' => 1700000100])], ImpersonationGuard::UNVERIFIED],
+			// what names no credential refuses nothing
+			'its token is known to be revoked' => [null, ['active_aaaaaaaaaaaaaaaa' => \json_encode(self::RECORD + ['pending' => true, 'ended' => 1700000100, 'tokenRevoked' => true])], ImpersonationGuard::PROCEED],
+			'an unreadable record' => [null, ['active_aaaaaaaaaaaaaaaa' => 'garbage'], ImpersonationGuard::PROCEED],
+			'another value of the app' => [null, ['starts_blocked' => 'true', 'activeX' => $record], ImpersonationGuard::PROCEED],
+		];
+	}
+
+	/**
+	 * The guard could not be built (e.g. a service of the app throws after a platform update).
+	 *
+	 * @dataProvider withoutGuardProvider
+	 */
+	public function testWithoutTheGuardARequestIsRefusedWhenAnImpersonationCouldBeInvolved(?string $impersonator, array $values, int $expected): void {
+		$this->assertSame($expected, ImpersonationGuard::statusWithoutGuard($this->sessionOf($impersonator), $this->configWith($values)));
+	}
+
+	public function testWithoutTheGuardWhatCanNotBeToldIsRefused(): void {
+		$this->assertSame(ImpersonationGuard::UNVERIFIED, ImpersonationGuard::statusWithoutGuard(null, $this->configWith([])), 'no session');
+		$this->assertSame(ImpersonationGuard::UNVERIFIED, ImpersonationGuard::statusWithoutGuard($this->sessionOf(null), null), 'no config');
+		$session = $this->createMock(ISession::class);
+		$session->method('get')->willThrowException(new \RuntimeException('session backend down'));
+		$this->assertSame(ImpersonationGuard::UNVERIFIED, ImpersonationGuard::statusWithoutGuard($session, $this->configWith([])), 'unreadable session');
+		$config = $this->createMock(IConfig::class);
+		$config->method('getAppKeys')->willThrowException(new \RuntimeException('database down'));
+		$this->assertSame(ImpersonationGuard::UNVERIFIED, ImpersonationGuard::statusWithoutGuard($this->sessionOf(null), $config), 'unreadable records');
+	}
+
+	public function testTheCommandLineIsNoRequestToCheck(): void {
+		// occ and cron.php: onLoadedApps() leaves them alone, also when the guard can not be built
+		// (occ app:disable must stay possible); the PHP web server is no command line
+		$this->assertTrue(ImpersonationGuard::isCommandLine(), 'the unit tests run on the command line');
+		$this->assertFalse($this->guard->isActiveForThisRequest(), 'the guard did not run for this process');
+	}
+
+	public function testDiscardingTheOutputBuffersEndsAtABufferThatCanNotBeRemoved(): void {
+		// three buffers, the second one can not be removed (ob_end_clean() fails, the level stays)
+		$level = 3;
+		$attempts = 0;
+		ImpersonationGuard::discardOutputBuffers(function () use (&$level): int {
+			return $level;
+		}, function () use (&$level, &$attempts): bool {
+			$attempts++;
+			if ($level === 2) {
+				return false;
+			}
+			$level--;
+			return true;
+		});
+		$this->assertSame(2, $level);
+		$this->assertSame(2, $attempts);
+
+		// a removal that reports success but leaves the level as it was does not loop either
+		$attempts = 0;
+		ImpersonationGuard::discardOutputBuffers(function (): int {
+			return 1;
+		}, function () use (&$attempts): bool {
+			$attempts++;
+			return true;
+		});
+		$this->assertSame(1, $attempts);
+
+		// removable buffers are all removed
+		$level = 4;
+		ImpersonationGuard::discardOutputBuffers(function () use (&$level): int {
+			return $level;
+		}, function () use (&$level): bool {
+			$level--;
+			return true;
+		});
+		$this->assertSame(0, $level);
+	}
+
+	public function testTheSessionOfOneImpersonationMustNotPresentTheTokenOfAnother(): void {
+		// admin impersonates alice in this session (record "own"); the request presents the session id
+		// of another impersonation (record "r1") as a token
+		$this->validImpersonation();
+		$this->request('GET', '/apps/files/');
+		$this->util->method('getRecordId')->willReturn('own');
+		$this->registry->method('all')->willReturn(['own' => ['token' => 70] + self::RECORD, 'r1' => self::RECORD]);
+		$this->tokens = [
+			'this-session-id' => ['id' => 70, 'uid' => 'alice'],
+			'the-impersonated-session-id' => ['id' => 60, 'uid' => 'alice'],
+		];
+		$this->util->method('getSessionSecrets')->willReturn(['this-session-id']);
+		$this->request->method('getHeader')->willReturnCallback(function ($name) {
+			return $name === 'Authorization' ? 'token the-impersonated-session-id' : null;
+		});
+		$this->reconciler->expects($this->once())->method('end')->with('r1', self::RECORD, Reconciler::REASON_TOKEN_MISUSE);
+		$this->userSession->expects($this->once())->method('logout');
+		$this->assertSame(ImpersonationGuard::TOKEN_MISUSE, $this->guard->check());
+	}
+
+	public function testTheOwnSessionTokenOfAnImpersonatedSessionIsNoMisuse(): void {
+		$this->validImpersonation();
+		$this->request('GET', '/apps/files/');
+		$this->util->method('getRecordId')->willReturn('own');
+		$this->registry->method('all')->willReturn(['own' => ['token' => 70] + self::RECORD]);
+		$this->tokens = ['this-session-id' => ['id' => 70, 'uid' => 'alice']];
+		$this->util->method('getSessionSecrets')->willReturn(['this-session-id']);
+		$this->reconciler->expects($this->never())->method('end');
+		// nothing else is recorded: nothing is looked up
+		$this->cleanup->expects($this->never())->method('findToken');
+		$this->assertSame(ImpersonationGuard::PROCEED, $this->guard->check());
+	}
+
+	public function testARecordWhoseTokenIsKnownToBeRevokedIsNotWatched(): void {
+		// it only waits for its cleanup: its token can not be presented anymore, nothing is looked up
+		$this->otherRequestWhileAnImpersonationIsActive(self::RECORD + ['pending' => true, 'ended' => 1700000100, 'tokenRevoked' => true]);
+		$this->util->method('getSessionSecrets')->willReturn(['the-impersonated-session-id']);
+		$this->params = self::decoys(300);
+		$this->cleanup->expects($this->never())->method('findToken');
+		$this->assertSame(ImpersonationGuard::PROCEED, $this->guard->check());
+	}
+
+	public function testTheLimitOfLookedUpValuesIsExact(): void {
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn([]);
+		$this->params = self::decoys(256);
+		$this->assertSame(ImpersonationGuard::PROCEED, $this->guard->check(), '256 values are looked up');
+		$this->params = self::decoys(257);
+		$this->assertSame(ImpersonationGuard::UNVERIFIED, $this->guard->check(), 'one more is refused');
+	}
+
+	public function testARequestWithAHugeNumberOfValuesIsRefusedWithoutWalkingThemAll(): void {
+		// the walk stops at the limit: what comes after it is not looked at
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn([]);
+		$this->params = ['first' => self::decoys(300), 'rest' => \array_fill(0, 200000, self::sessionId('more'))];
+		$this->cleanup->expects($this->never())->method('findToken');
+		$start = \microtime(true);
+		$this->assertSame(ImpersonationGuard::UNVERIFIED, $this->guard->check());
+		$this->assertLessThan(5.0, \microtime(true) - $start);
+	}
+
+	public function testABasicHeaderIsAlsoDecodedTheTolerantWay(): void {
+		// a component that decodes Base64 tolerantly (skipping characters that are no Base64) reads
+		// the session id where a strict decoder reads nothing
+		$this->otherRequestWhileAnImpersonationIsActive();
+		$this->util->method('getSessionSecrets')->willReturn([]);
+		$encoded = \base64_encode('alice:the-impersonated-session-id');
+		$this->assertFalse(\base64_decode(\substr($encoded, 0, 8) . '*' . \substr($encoded, 8), true));
+		$this->request->method('getHeader')->willReturnCallback(function ($name) use ($encoded) {
+			return $name === 'Authorization' ? 'Basic ' . \substr($encoded, 0, 8) . '*' . \substr($encoded, 8) : null;
+		});
+		$this->reconciler->expects($this->once())->method('end')->with('r1', self::RECORD, Reconciler::REASON_TOKEN_MISUSE);
+		$this->assertSame(ImpersonationGuard::TOKEN_MISUSE, $this->guard->check());
+	}
+
+	public function testThePathIsLoggedWithoutLineBreaks(): void {
+		// a refused request may come from anybody: its path does not forge log lines
+		$this->util->method('isImpersonating')->willReturn(true);
+		$this->util->method('getImpersonatorUid')->willReturn('admin');
+		$this->util->method('getTargetUid')->willReturn('alice');
+		$this->policy->method('getExtraForbiddenPrefixes')->willReturn([]);
+		$this->request('GET', '/apps/oauth2/x%0A2026-11-28 forged%E2%80%A8line%0D');
+		$this->logger->expects($this->once())->method('warning')->with(
+			$this->anything(),
+			$this->callback(function (array $context) {
+				return $context['path'] === '/apps/oauth2/x?2026-11-28 forged?line?';
+			})
+		);
+		$this->assertSame(ImpersonationGuard::FORBIDDEN_REQUEST, $this->guard->check());
 	}
 
 	public static function requestProvider(): array {
@@ -733,6 +980,12 @@ class ImpersonationGuardTest extends TestCase {
 			[true, 'GET', '/', null, false],
 			// the way back is never refused
 			[true, 'GET', '/logout', null, false],
+			// "." and ".." are resolved as well: the compared form does not depend on who resolves them
+			[true, 'POST', '/settings/personal/./authtokens', null, true],
+			[true, 'POST', '/settings/personal/x/../authtokens', null, true],
+			[true, 'GET', '/apps/files/../oauth2/authorize', null, true],
+			[true, 'GET', '/cloud/user/signing-key/..', null, false],
+			[true, 'GET', '/apps/../logout', null, false],
 		];
 	}
 

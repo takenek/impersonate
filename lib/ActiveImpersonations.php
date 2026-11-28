@@ -44,12 +44,18 @@ use OCP\Security\ISecureRandom;
  *   only once the impersonation has ended and its cleanup has to be retried:
  *   'pending' => true,
  *   'ended' => int     unix time,
- *   'ceiling' => int   (optional) tokens with a higher id appeared after the end
+ *   'ceiling' => int   (optional) tokens with a higher id appeared after the end,
+ *   'tokenRevoked' => true (optional) the session token "Impersonated by <uid>" is known to be
+ *                      revoked: the record names no credential anymore, only the cleanup is left
  * ]
+ *
+ * The app config value "starts_blocked" ("true") blocks new impersonations for a maintenance
+ * window (occ impersonate:active --block / --unblock).
  */
 class ActiveImpersonations {
 	private const APP = 'impersonate';
-	private const PREFIX = 'active_';
+	public const PREFIX = 'active_';
+	public const STARTS_BLOCKED = 'starts_blocked';
 
 	/** @var IConfig */
 	private $config;
@@ -110,10 +116,60 @@ class ActiveImpersonations {
 	 *
 	 * @return array<string, array<string, mixed>|null> id => record, null for an unreadable record
 	 * @throws \Exception if the database can not be read
+	 * @phpstan-impure every call reads the database anew
 	 */
 	public function allFresh(): array {
-		$query = $this->connection->getQueryBuilder();
-		// all values of the app (a handful): the records are picked below, without a
+		$records = [];
+		foreach ($this->freshValues() as $key => $value) {
+			if (\strpos($key, self::PREFIX) !== 0) {
+				continue;
+			}
+			$id = \substr($key, \strlen(self::PREFIX));
+			$records[$id] = self::isId($id) ? self::decode($value) : null;
+		}
+		return $records;
+	}
+
+	/**
+	 * Are new impersonations blocked (maintenance window)? Read from the database: the occ command
+	 * that sets the block runs in another process than the request that starts an impersonation.
+	 *
+	 * @throws \Exception if the database can not be read
+	 * @phpstan-impure every call reads the database anew
+	 */
+	public function startsBlocked(): bool {
+		return ($this->freshValues()[self::STARTS_BLOCKED] ?? null) === 'true';
+	}
+
+	public function blockStarts(): void {
+		$this->config->setAppValue(self::APP, self::STARTS_BLOCKED, 'true');
+	}
+
+	public function allowStarts(): void {
+		$this->config->deleteAppValue(self::APP, self::STARTS_BLOCKED);
+	}
+
+	/**
+	 * All app config values of the app as the database has them now.
+	 *
+	 * @return array<string, mixed> key => value
+	 * @throws \Exception if the database can not be read
+	 * @phpstan-impure every call reads the database anew
+	 */
+	private function freshValues(): array {
+		return self::freshAppValues($this->connection);
+	}
+
+	/**
+	 * All app config values of the app as the database has them now (also for Policy).
+	 *
+	 * @return array<string, mixed> key => value
+	 * @throws \Exception if the database can not be read
+	 * @phpstan-impure every call reads the database anew
+	 */
+	public static function freshAppValues(IDBConnection $connection): array {
+		$query = $connection->getQueryBuilder();
+		// all values of the app (a handful): the records are picked by the callers, without a
 		// LIKE whose escaping differs between databases
 		$query->select('configkey')
 			->addSelect('configvalue')
@@ -129,16 +185,14 @@ class ActiveImpersonations {
 				break;
 			}
 		}
-		$records = [];
+		$values = [];
 		foreach (\is_array($rows) ? $rows : [] as $row) {
 			$key = \is_array($row) ? ($row['configkey'] ?? null) : null;
-			if (!\is_string($key) || \strpos($key, self::PREFIX) !== 0) {
-				continue;
+			if (\is_string($key)) {
+				$values[$key] = $row['configvalue'] ?? null;
 			}
-			$id = \substr($key, \strlen(self::PREFIX));
-			$records[$id] = self::isId($id) ? self::decode($row['configvalue'] ?? null) : null;
 		}
-		return $records;
+		return $values;
 	}
 
 	/**
@@ -149,8 +203,17 @@ class ActiveImpersonations {
 	 *                                     it from the database, see allFresh())
 	 * @param int|null $ceiling highest token id the cleanup may touch (see CredentialCleanup), if known
 	 * @param bool $signingKeyDone the URL signing key needs no further attention
+	 * @param bool $tokenRevoked the session token of the impersonation is known to be revoked (once
+	 *                           known, it stays known)
 	 */
-	public function markPending(string $id, array $record, int $now, ?int $ceiling = null, bool $signingKeyDone = false): void {
+	public function markPending(
+		string $id,
+		array $record,
+		int $now,
+		?int $ceiling = null,
+		bool $signingKeyDone = false,
+		bool $tokenRevoked = false
+	): void {
 		$record = self::isId($id) ? self::normalize($record) : null;
 		if ($record === null) {
 			return;
@@ -164,13 +227,29 @@ class ActiveImpersonations {
 			// nothing to remove anymore, whatever the user does from now on
 			$record['signingKey'] = true;
 		}
+		if ($tokenRevoked) {
+			$record['tokenRevoked'] = true;
+		}
 		$this->config->setAppValue(self::APP, self::PREFIX . $id, \json_encode($record, JSON_THROW_ON_ERROR));
+		// a pending record is retried by the job only: it must be on the job list
+		$this->ensureReconcileJob();
 	}
 
 	public function close(string $id): void {
 		if (self::isId($id)) {
 			$this->config->deleteAppValue(self::APP, self::PREFIX . $id);
 		}
+	}
+
+	/**
+	 * Does the record name a session token that may still be valid (an impersonation that has
+	 * not ended, or one whose session token is not known to be revoked)? Only such a record has
+	 * to be watched for its token being presented elsewhere (ImpersonationGuard).
+	 *
+	 * @param array<string, mixed>|null $record
+	 */
+	public static function namesCredential(?array $record): bool {
+		return $record !== null && !(isset($record['pending']) && ($record['tokenRevoked'] ?? false) === true);
 	}
 
 	/**
@@ -210,16 +289,24 @@ class ActiveImpersonations {
 	}
 
 	/**
-	 * Take the reconcile job off the job list when no record is left. The job
-	 * list keeps a job of an app that is disabled, which the platform reports
-	 * as an error on every run: "occ impersonate:active --end" leaves nothing
-	 * behind. The next impersonation registers the job again. Never throws.
+	 * Take the reconcile job off the job list when no record is left, and make
+	 * sure it is on it while one is. The job list keeps a job of an app that is
+	 * disabled, which the platform reports as an error on every run: "occ
+	 * impersonate:active --end" leaves nothing behind. The next impersonation
+	 * registers the job again. Never throws.
 	 */
 	public function releaseReconcileJobIfIdle(): void {
 		try {
 			// as the database has it now: an impersonation may have started meanwhile
 			if ($this->allFresh() === []) {
 				$this->jobList->remove(Reconcile::class);
+				// ... or right between the look and the removal: then it needs the job again
+				if ($this->allFresh() !== []) {
+					$this->ensureReconcileJob();
+				}
+			} else {
+				// a record that is left needs the job (its registration may have failed)
+				$this->ensureReconcileJob();
 			}
 		} catch (\Throwable $e) {
 			$this->logger->logException($e, ['app' => 'impersonate']);
@@ -229,7 +316,8 @@ class ActiveImpersonations {
 	/**
 	 * The records are useless without the job that works on them. A failure to
 	 * register it is logged and does not stop the impersonation: the session
-	 * based controls do not depend on the job.
+	 * based controls do not depend on the job. It is tried again whenever a
+	 * record is marked as pending.
 	 */
 	private function ensureReconcileJob(): void {
 		try {
@@ -246,10 +334,12 @@ class ActiveImpersonations {
 	}
 
 	/**
+	 * A record as it is stored (also used where the services of the app are not available).
+	 *
 	 * @param mixed $raw
-	 * @return array<string, mixed>|null
+	 * @return array<string, mixed>|null null if it is not a (complete) record
 	 */
-	private static function decode($raw): ?array {
+	public static function decode($raw): ?array {
 		if (!\is_string($raw) || $raw === '') {
 			return null;
 		}
@@ -292,6 +382,9 @@ class ActiveImpersonations {
 				: $record['start'];
 			if (isset($record['ceiling']) && \is_int($record['ceiling']) && $record['ceiling'] >= 0) {
 				$normalized['ceiling'] = $record['ceiling'];
+			}
+			if (($record['tokenRevoked'] ?? false) === true) {
+				$normalized['tokenRevoked'] = true;
 			}
 		}
 		return $normalized;

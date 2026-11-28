@@ -6,10 +6,12 @@
 # See LICENSE and COPYRIGHT for the license and the AGPL section 7 attribution terms.
 #
 # The release archive holds the app and nothing else: every member must match the allow-list
-# below (one folder "impersonate", required by the ownCloud 11 installer), the compiled templates
-# must be there and the version must be the expected one.
+# below (one folder "impersonate", required by the ownCloud 11 installer), be a regular file with
+# the mode 644 or 755 or a directory with the mode 755 (no symbolic or hard link, no device, no
+# set-uid/set-gid/sticky bit, nothing writable by group or others), appear once and belong to 0/0;
+# the compiled templates must be there and the version must be the expected one.
 #
-#   tests/ci/check-archive.sh build/impersonate-1.0.3.tar.gz 1.0.3
+#   tests/ci/check-archive.sh build/impersonate-1.0.4.tar.gz 1.0.4
 set -euo pipefail
 archive=${1:?archive}
 version=${2:?version}
@@ -33,10 +35,25 @@ for required in impersonate/appinfo/info.xml impersonate/COPYRIGHT impersonate/L
 	impersonate/l10n/zh-Hans.js; do
 	tar -tzf "$archive" "$required" >/dev/null 2>&1 || { echo "missing in the release archive: $required" >&2; bad=1; }
 done
-tar -xzOf "$archive" impersonate/appinfo/info.xml | grep -q "<version>${version}</version>" \
+# (each check reads all of its input itself: a reader that stops early, like grep -q, would end
+# the pipeline with SIGPIPE, which pipefail turns into "no match")
+info=$(tar -xzOf "$archive" impersonate/appinfo/info.xml || true)
+[[ "$info" == *"<version>${version}</version>"* ]] \
 	|| { echo "info.xml in the archive does not have version $version" >&2; bad=1; }
-if tar -tzvf "$archive" | awk '{print $2}' | grep -qv '^0/0$'; then
+listing=$(LC_ALL=C tar --numeric-owner -tzvf "$archive")
+# type and mode: a link ("l", "h"), a device, a special bit (s, S, t, T) or any other mode does not match
+if ! awk '$1 !~ /^(-rw-r--r--|-rwxr-xr-x|drwxr-xr-x)$/ { print > "/dev/stderr"; found = 1 } END { exit found }' <<<"$listing"; then
+	echo "archive members must be regular files with the mode 644 or 755 or directories with the mode 755" >&2
+	bad=1
+fi
+if ! awk '$2 != "0/0" { print > "/dev/stderr"; found = 1 } END { exit found }' <<<"$listing"; then
 	echo "archive members must be owned by 0/0" >&2
+	bad=1
+fi
+# every path once (tar would extract a later member over an earlier one of the same name)
+duplicates=$(tar -tzf "$archive" | sed 's:/$::' | LC_ALL=C sort | uniq -d)
+if [ -n "$duplicates" ]; then
+	echo "names that appear more than once in the release archive: $duplicates" >&2
 	bad=1
 fi
 [ "$bad" -eq 0 ] && echo "release archive OK: $(tar -tzf "$archive" | wc -l) members"

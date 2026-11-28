@@ -6,6 +6,140 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-28
+
+Security release after a further full review of 1.0.3 (README section 7, SECURITY.md "Security
+review"). The review found no vulnerability of critical, high or medium risk; it found twelve of low
+risk and nineteen observations, mostly in failure paths, maintenance procedures and the release
+tooling. Every finding that can be fixed within the plugin is fixed here.
+
+### Upgrade notes
+- Upgrade from 1.0.1, 1.0.2 or 1.0.3 as README section 2 describes it: the installed version has no
+  `--block` yet and reports an open cleanup only with `--end`, so run `occ impersonate:active --end`
+  twice and continue only if the second run prints nothing but `No active impersonations.`; after
+  the upgrade run `occ impersonate:active --unblock` (harmless if nothing is blocked). Reload PHP-FPM
+  or Apache after the folder is replaced (README section 2, step 4). From 1.0.0 or 0.x read the
+  upgrade notes of 1.0.1 first.
+- `occ impersonate:active --end` returns 0 only if nothing is active and no cleanup is open
+  afterwards: 1 if an impersonation could not be ended, 3 if a cleanup (possibly the revocation of a
+  session token) is still open, 2 for `--block` with `--unblock`. Up to 1.0.3 it returned 0 with an
+  open cleanup. Automation that disables or replaces the app must stop on anything but 0.
+- New options `--block` and `--unblock`: new impersonations are refused while the app config value
+  `starts_blocked` is `true` (the users page says "Can not impersonate. Please contact your server
+  administrator to allow impersonation."). Remove it after an uninstall:
+  `occ config:app:delete impersonate starts_blocked`.
+- A request during which the re-check ends an impersonation is refused with HTTP 401 and a JSON
+  message ("The impersonation has ended, please log in again"); up to 1.0.3 it went on as a request
+  without a user (a page in the browser showed the login page). A logout request (`/logout`) is not
+  refused.
+- An impersonation starts only if the app is enabled for everybody (app config `enabled` = `yes`);
+  any value but `no` was enough before. ownCloud does not enable the app for groups, so this only
+  matters for a value written into the configuration directly.
+- The start also needs a valid CSRF token when `allow_start_with_credentials` is `true` (the user
+  interface always sends it): a script that starts impersonations with credentials must send the
+  token of a page of the session.
+- The option "Allow group admins to impersonate members who are group admins themselves" is stored
+  together with the delegation it was given for (a JSON value in
+  `impersonate_allow_groupadmin_targets`; the value `true` – set with occ or saved by an earlier
+  version – keeps working, without the binding, until the policy is saved again). After a downgrade
+  to 1.0.3 the option counts as off until it is saved there again.
+- The events `user.afterimpersonate` and `user.afterimpersonatelogout` have the new argument
+  `impersonation` (the id of the server-side record); the other arguments are unchanged.
+
+### Security
+- `occ impersonate:active --end` was not a reliable step before maintenance: it reported success while
+  a cleanup, possibly the revocation of a session token, was still open; on the path "nothing active"
+  it read the records as the process had loaded them; and nothing kept a new impersonation from
+  starting between the command and the disabling or replacement of the app. It now reads the
+  records from the database, reports open cleanups (and whether their session token is known to be
+  revoked) with a distinct exit status, can block new starts (`--block`, `--unblock`; the start
+  checks the block before and again after its record exists, so that no impersonation slips past
+  the command), lists every record that still waits for its cleanup, and warns when new
+  impersonations can still be started. The README procedures for the upgrade and the uninstall use
+  it.
+- The request guard now refuses in every branch in which it cannot verify: if it cannot be built,
+  requests are refused while an impersonation whose session token may still be valid is recorded
+  (before: only requests of impersonated sessions; `occ` and `cron.php` on the command line are not
+  affected); no impersonation starts in a request the guard has not checked (a hook that was not
+  registered or not emitted); the request during which the re-check ends an impersonation is
+  refused (before: it went on); in ownCloud's incognito mode the checks that need no user (record,
+  session token, maximum duration) still run (before: none).
+- The record of an impersonation whose session token could not be revoked was dropped seven days
+  after the end, and the guard no longer recognized that token. The record now remembers whether
+  its token is known to be revoked and is kept until it is (an error is logged at every retry
+  after the seven days); only the record of a user that cannot be loaded is still dropped seven
+  days after the end.
+- Credential cleanup and reconciliation: a cleanup based on a token list that ownCloud's listing
+  limit may have cut off no longer counts as complete (the record stays and is retried, and no
+  upper bound is taken from such a list); without the list of the sessions of other
+  impersonations of the same user nothing but the session token is revoked (before: the cleanup
+  could end another, legitimate impersonation); the list is read from the database right before
+  each cleanup; a session that ends
+  an impersonation ended elsewhere keeps to the upper bound stored in its record; ending an
+  impersonation acts on the record as the database has it now (no second end event, no cleanup
+  without the stored bound); a record that is marked as pending, or that `occ impersonate:active
+  --end` leaves, gets the background job back if its registration had failed, and a job released
+  while an impersonation started is registered again.
+- The per-request check of the session token stops collecting request values as soon as the limit
+  of 256 is exceeded (before: the whole request was walked first), and records whose session token
+  is known to be revoked are not watched (no lookups for them).
+- The refusal could loop until the time limit of the request on an output buffer that cannot be
+  removed; it now stops at such a buffer. The refusal carries `X-Content-Type-Options: nosniff`.
+- With `allow_start_with_credentials` the start of an impersonation relied on ownCloud alone for
+  CSRF protection; the app now checks the CSRF token of every start itself.
+- The delegation policy is four app config values written one after the other: two saves that
+  overlapped could leave the mode of one with the consent "group admins as targets" of the other, a
+  delegation broader than either administrator approved. The consent is now stored with the
+  delegation it was given for and only applies to exactly that delegation (so a consent given in
+  "administrators only", where it has no effect, does not apply in a mode chosen later). The
+  deletion of a group reads the stored list and option from the database instead of from what its
+  request loaded (an administrator may have saved the policy meanwhile) and switches the option off
+  if it was given for a list with that group (logged; save the policy again to keep it).
+- The check of the release archive compared names and owner only: a symbolic or hard link, a name
+  that appears twice or a file with special mode bits under an allowed name passed. It now accepts
+  regular files with the mode 644 or 755 and directories with the mode 755 only, each name once,
+  and no check can be cut short by `pipefail` (a reader that stops early made the owner check of
+  1.0.3 miss a member of a large archive); `make dist` fails if the build folder contains anything
+  else, and CI fails if the repository tracks a symbolic link.
+- Any `enabled` value other than `no` counted as "enabled for everybody"; see the upgrade notes.
+- Names of revoked tokens (free text of whoever created them) reach the log, the event and the
+  notification of the account owner without control characters, line breaks and invisible format
+  characters (direction overrides, zero-width characters) and at most 120 characters long, also in
+  notifications that an earlier version stored; request paths are logged without control
+  characters and line breaks.
+- Smaller fixes from the observations of the review: the session of one impersonation that presents
+  the session token of another one is refused and ends both; the password of HTTP Basic
+  authentication is also decoded tolerantly for the check; "." and ".." segments are resolved for
+  the deny-list; a group admin none of whose groups is delegated gets the empty answer on the users
+  page; without the group admin switch of ownCloud 11 the group admin feature counts as disabled;
+  only exactly `0` in `max_duration_minutes` removes the limit (`0` with a line break after it
+  counted as `0`; white space around a positive number does not matter) and a JSON object is no
+  list in `impersonate_include_groups_list` (in `forbidden_prefixes` an object with the keys 0, 1,
+  ... is still used as a list: what was refused stays refused); start and end events carry the id
+  of the impersonation; every revoked credential gets a notification of its own.
+
+### Changed
+- Build: `npm ci` runs with `--ignore-scripts`; the default `make` target installs the composer
+  dependencies from `composer.lock` without updating them; the lockfile entry of `wordwrap` carries
+  the SHA-512 integrity value of the registry instead of SHA-1. CI: the report file of the planted
+  secret of the gitleaks control step is created private (gitleaks 8.30.1, the newest release, is
+  affected by CVE-2026-124039; the real scans write no report file).
+- The manifest links to the README of this app instead of the manual of the original app.
+- Documentation: README (requirements: a fresh PHP state for every request, session locking;
+  upgrade and uninstall with `--block` and the exit status, and a reload of PHP-FPM or Apache after
+  the folder is replaced in every case – opcache checks each file separately, so a request could
+  mix files of two versions; the app must be enabled for everybody; cost of the per-request check;
+  known limitations) and SECURITY.md (security model, accepted risks: session
+  locking, other authentication apps; hardening checklist; review) describe the new behaviour.
+- Tests: unit tests for every change (among them all interleavings of two overlapping policy saves),
+  end-to-end checks for the maintenance window and the exit status, the refused request after an
+  end, the CSRF check with `allow_start_with_credentials`, a group-limited `enabled` value, two
+  impersonations presenting each other's session, log lines and the stored consent. Before the
+  release the tests ran on ownCloud 11.1.0 with PHP 8.3 on SQLite with PHP's built-in web server
+  (as in CI), on MariaDB 11.8 with Apache 2.4 and mod_php, and on PostgreSQL 17 with nginx 1.26 and
+  PHP-FPM, together with the upgrade from the published 1.0.3 archive as README section 2 describes
+  it.
+
 ## [1.0.3] - 2026-11-27
 
 Translation and maintenance release. The user interface is translated into every language that
@@ -426,7 +560,8 @@ owncloud-impersonate (0.0.2)
 owncloud-impersonate (0.0.1)
 * First release
 
-[Unreleased]: https://github.com/takenek/impersonate/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/takenek/impersonate/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/takenek/impersonate/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/takenek/impersonate/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/takenek/impersonate/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/takenek/impersonate/compare/v1.0.0...v1.0.1

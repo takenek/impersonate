@@ -44,7 +44,9 @@ class Application extends App {
 			return new Policy(
 				$server->getConfig(),
 				$groupManager,
-				$groupManager->getSubAdmin()
+				$groupManager->getSubAdmin(),
+				$server->getDatabaseConnection(),
+				$server->getLogger()
 			);
 		});
 		$container->registerService(EventDispatcherInterface::class, function () use ($server) {
@@ -128,8 +130,8 @@ class Application extends App {
 				$server->getLogger()
 			);
 		});
-		$container->registerService(Active::class, function ($c) {
-			return new Active($c->query(Reconciler::class));
+		$container->registerService(Active::class, function ($c) use ($server) {
+			return new Active($c->query(Reconciler::class), $server->getConfig());
 		});
 	}
 }

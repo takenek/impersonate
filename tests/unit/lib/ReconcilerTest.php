@@ -82,7 +82,7 @@ class ReconcilerTest extends TestCase {
 			$this->closed[] = $id;
 			unset($this->records[$id]);
 		});
-		$this->registry->method('markPending')->willReturnCallback(function ($id, $record, $now, $ceiling = null, $signingKeyDone = false) {
+		$this->registry->method('markPending')->willReturnCallback(function ($id, $record, $now, $ceiling = null, $signingKeyDone = false, $tokenRevoked = false) {
 			// the record the job read from the database is the one that is written back
 			$this->assertSame($this->records[$id], $record);
 			$this->pending[] = [$id, $now, $ceiling, $signingKeyDone];
@@ -93,6 +93,9 @@ class ReconcilerTest extends TestCase {
 			}
 			if ($signingKeyDone) {
 				$this->records[$id]['signingKey'] = true;
+			}
+			if ($tokenRevoked) {
+				$this->records[$id]['tokenRevoked'] = true;
 			}
 		});
 		$this->cleanup = $this->createMock(CredentialCleanup::class);
@@ -328,17 +331,101 @@ class ReconcilerTest extends TestCase {
 	}
 
 	public function testACleanupThatKeepsFailingIsGivenUpWithAnErrorAWeekAfterTheEnd(): void {
+		// the session token is revoked: only credentials that appeared can not be cleaned up
 		$ended = self::START + 30 * 24 * 3600;
 		$this->records = ['a' => self::RECORD + ['pending' => true, 'ended' => $ended]];
-		$this->cleanup->method('revokeSessionToken')->willReturn(false);
-		$this->cleanup->method('run')->willReturn(self::DONE);
+		$this->cleanup->method('revokeSessionToken')->willReturn(true);
+		$this->cleanup->method('run')->willReturn(['tokens' => false, 'signingKey' => true, 'ceiling' => 70]);
 		$this->auditTrail->expects($this->never())->method('ended');
 
 		$this->logger->expects($this->once())->method('error')->with($this->stringContains('Giving up'));
 		$this->assertSame(0, $this->reconciler->run(false, $ended + Reconciler::GIVE_UP_AFTER));
 		$this->assertSame([], $this->closed);
+		$this->assertTrue($this->records['a']['tokenRevoked'], 'the record remembers that its token is gone');
 		$this->assertSame(0, $this->reconciler->run(false, $ended + Reconciler::GIVE_UP_AFTER + 1));
 		$this->assertSame(['a'], $this->closed);
+	}
+
+	public function testARecordWhoseSessionTokenCanNotBeRevokedIsKeptPastTheGiveUpTime(): void {
+		// The record is the only thing that lets the guard recognize the session token of the
+		// impersonation: as long as that token is not known to be revoked, the record stays.
+		$ended = self::START + 30 * 24 * 3600;
+		$this->records = ['a' => self::RECORD + ['pending' => true, 'ended' => $ended]];
+		$this->cleanup->method('revokeSessionToken')->willReturn(false);
+		$this->cleanup->method('run')->willReturn(self::DONE);
+		$this->logger->expects($this->exactly(2))->method('error')
+			->with($this->stringContains('could still not be revoked: the record is kept'));
+		$this->assertSame(0, $this->reconciler->run(false, $ended + Reconciler::GIVE_UP_AFTER + 1));
+		$this->assertSame(0, $this->reconciler->run(false, $ended + 10 * Reconciler::GIVE_UP_AFTER));
+		$this->assertSame([], $this->closed);
+		$this->assertArrayNotHasKey('tokenRevoked', $this->records['a']);
+		$this->assertSame(1, $this->reconciler->countPendingWithoutRevokedToken());
+
+		// once the revocation works, the record is closed as usual
+		$reconciler = new Reconciler($this->registry, $this->cleanupThatWorks(), $this->policy, $this->userManager, $this->auditTrail, $this->logger);
+		$reconciler->run(false, $ended + 11 * Reconciler::GIVE_UP_AFTER);
+		$this->assertSame(['a'], $this->closed);
+	}
+
+	public function testATokenRevokedEarlierStaysKnownAsRevoked(): void {
+		// revoked by an earlier attempt: a later failure of the same call changes nothing about that
+		$ended = self::START + 60;
+		$this->records = ['a' => self::RECORD + ['pending' => true, 'ended' => $ended, 'tokenRevoked' => true]];
+		$this->cleanup->method('revokeSessionToken')->willReturn(false);
+		$this->cleanup->method('run')->willReturn(self::DONE);
+		$this->logger->expects($this->once())->method('error')->with($this->stringContains('Giving up'));
+		$this->assertSame(0, $this->reconciler->countPendingWithoutRevokedToken());
+		$this->reconciler->run(false, $ended + Reconciler::GIVE_UP_AFTER + 1);
+		$this->assertSame(['a'], $this->closed);
+	}
+
+	/**
+	 * @return CredentialCleanup|MockObject
+	 */
+	private function cleanupThatWorks() {
+		$cleanup = $this->createMock(CredentialCleanup::class);
+		$cleanup->method('revokeSessionToken')->willReturn(true);
+		$cleanup->method('run')->willReturn(self::DONE);
+		return $cleanup;
+	}
+
+	public function testEndingAnImpersonationThatWasClosedMeanwhileOnlyRevokesItsToken(): void {
+		// another request ended it (and reported it) after the guard read the record
+		$this->records = [];
+		$this->cleanup->expects($this->once())->method('revokeSessionToken')->with($this->alice, 60)->willReturn(true);
+		$this->cleanup->expects($this->never())->method('run');
+		$this->auditTrail->expects($this->never())->method('ended');
+		$this->reconciler->end('a', self::RECORD, Reconciler::REASON_TOKEN_MISUSE, self::START + 60);
+		$this->assertSame([], $this->pending);
+	}
+
+	public function testEndingAnImpersonationThatHasEndedMeanwhileOnlyRetriesItsCleanup(): void {
+		// the caller read it as active, the database has it as ended: it is not reported again, and
+		// the cleanup keeps the ceiling the record has now
+		$this->records = ['a' => self::RECORD + ['pending' => true, 'ended' => self::START + 30, 'ceiling' => 65]];
+		$this->cleanup->method('revokeSessionToken')->willReturn(true);
+		$this->cleanup->expects($this->once())->method('run')->with($this->alice, 60, false, 'admin', 65)->willReturn(self::DONE);
+		$this->auditTrail->expects($this->never())->method('ended');
+		$this->reconciler->end('a', self::RECORD, Reconciler::REASON_TOKEN_MISUSE, self::START + 60);
+		$this->assertSame(['a'], $this->closed);
+	}
+
+	public function testTheEndEventNamesTheImpersonation(): void {
+		$this->records = ['a' => self::RECORD];
+		$this->cleanup->method('hasSessionToken')->willReturn(false);
+		$this->cleanup->method('revokeSessionToken')->willReturn(true);
+		$this->cleanup->method('run')->willReturn(self::DONE);
+		$this->auditTrail->expects($this->once())->method('ended')->with('admin', 'alice', Reconciler::REASON_SESSION_GONE, 'a');
+		$this->reconciler->run(false, self::START + 60);
+	}
+
+	public function testStartsCanBeBlocked(): void {
+		$this->registry->expects($this->once())->method('blockStarts');
+		$this->registry->expects($this->once())->method('allowStarts');
+		$this->registry->method('startsBlocked')->willReturn(true);
+		$this->reconciler->blockStarts(true);
+		$this->reconciler->blockStarts(false);
+		$this->assertTrue($this->reconciler->startsBlocked());
 	}
 
 	public function testThePendingCleanupOfADeletedUserIsDropped(): void {
@@ -381,5 +468,50 @@ class ReconcilerTest extends TestCase {
 	public function testReleaseJobIfIdle(): void {
 		$this->registry->expects($this->once())->method('releaseReconcileJobIfIdle');
 		$this->reconciler->releaseJobIfIdle();
+	}
+
+	public function testTheSessionsToKeepAreReadRightBeforeEachCleanup(): void {
+		// an impersonation of the same user that was recorded after the run started keeps its session
+		$this->records = ['a' => self::RECORD];
+		$calls = 0;
+		$registry = $this->createMock(ActiveImpersonations::class);
+		$registry->method('allFresh')->willReturnCallback(function () use (&$calls) {
+			$calls++;
+			return $calls === 1 ? $this->records : $this->records + ['b' => ['token' => 75] + self::RECORD];
+		});
+		$reconciler = new Reconciler($registry, $this->cleanup, $this->policy, $this->userManager, $this->auditTrail, $this->logger);
+		$this->cleanup->method('hasSessionToken')->willReturn(false);
+		$this->cleanup->method('revokeSessionToken')->willReturn(true);
+		$this->cleanup->expects($this->once())->method('run')
+			->with($this->alice, 60, false, 'admin', null, [75])->willReturn(self::DONE);
+		$this->assertSame(1, $reconciler->run(false, self::START + 60));
+	}
+
+	public function testACleanupWithATokenListThatMayBeCutOffIsRetriedAndGivenUpAfterAWeek(): void {
+		// no ceiling from such a list: the retries look at everything up to the retry
+		$this->records = ['a' => self::RECORD];
+		$this->cleanup->method('hasSessionToken')->willReturn(false);
+		$this->cleanup->method('revokeSessionToken')->willReturn(true);
+		$ceilings = [];
+		$this->cleanup->method('run')->willReturnCallback(function ($target, $watermark, $signingKeyExisted, $impersonator, $ceiling) use (&$ceilings) {
+			$ceilings[] = $ceiling;
+			return ['tokens' => false, 'signingKey' => true, 'ceiling' => null];
+		});
+		$this->assertSame(1, $this->reconciler->run(false, self::START + 60));
+		$this->assertTrue($this->records['a']['tokenRevoked']);
+		$this->assertArrayNotHasKey('ceiling', $this->records['a']);
+		$this->assertSame(0, $this->reconciler->run(false, self::START + 400));
+		$this->assertSame([], $this->closed);
+		$this->logger->expects($this->once())->method('error')->with($this->stringContains('Giving up'));
+		$this->reconciler->run(false, self::START + 60 + Reconciler::GIVE_UP_AFTER + 1);
+		$this->assertSame(['a'], $this->closed);
+		$this->assertSame([null, null, null], $ceilings);
+	}
+
+	public function testThePendingRecordsAreListed(): void {
+		$pending = self::RECORD + ['pending' => true, 'ended' => self::START + 60];
+		$this->records = ['a' => $pending, 'b' => self::RECORD, 'c' => null];
+		$this->assertSame(['a' => $pending], $this->reconciler->getPending());
+		$this->assertSame(1, $this->reconciler->countPending());
 	}
 }

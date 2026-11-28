@@ -19,6 +19,7 @@ namespace OCA\Impersonate\Tests\Unit\Controller;
 
 use OCA\Impersonate\AuditTrail;
 use OCA\Impersonate\Controller\SettingsController;
+use OCA\Impersonate\ImpersonationGuard;
 use OCA\Impersonate\Policy;
 use OCA\Impersonate\RefusedException;
 use OCA\Impersonate\Util;
@@ -58,6 +59,14 @@ class SettingsControllerTest extends TestCase {
 	private $controller;
 	/** @var string */
 	private $appEnabled = 'yes';
+	/** @var ImpersonationGuard|MockObject */
+	private $guard;
+	/** @var bool the guard checked this request */
+	private $guardActive = true;
+	/** @var bool the request carries a valid CSRF token */
+	private $csrfValid = true;
+	/** @var bool|\Throwable new impersonations are blocked (occ impersonate:active --block) */
+	private $startsBlocked = false;
 
 	protected function tearDown(): void {
 		$_SERVER = $this->serverBackup;
@@ -78,12 +87,26 @@ class SettingsControllerTest extends TestCase {
 		$l10n->method('t')->willReturnArgument(0);
 		$this->policy = $this->createMock(Policy::class);
 		$this->util = $this->createMock(Util::class);
+		$this->util->method('areStartsBlocked')->willReturnCallback(function () {
+			if ($this->startsBlocked instanceof \Throwable) {
+				throw $this->startsBlocked;
+			}
+			return $this->startsBlocked;
+		});
+		$this->util->method('getRecordId')->willReturn('rrrrrrrrrrrrrrrr');
+		$this->guard = $this->createMock(ImpersonationGuard::class);
+		$this->guard->method('isActiveForThisRequest')->willReturnCallback(function () {
+			return $this->guardActive;
+		});
 		$this->auditTrail = $this->createMock(AuditTrail::class);
 		$this->logger = $this->createMock(ILogger::class);
 		$this->request = $this->createMock(IRequest::class);
 		$this->request->method('getRemoteAddress')->willReturn('10.0.0.1');
 		$this->request->method('getHeader')->willReturnCallback(function ($name) {
 			return $name === 'Authorization' ? $this->authorization : null;
+		});
+		$this->request->method('passesCSRFCheck')->willReturnCallback(function () {
+			return $this->csrfValid;
 		});
 		$this->controller = new SettingsController(
 			'impersonate',
@@ -95,7 +118,8 @@ class SettingsControllerTest extends TestCase {
 			$l10n,
 			$this->policy,
 			$this->util,
-			$this->auditTrail
+			$this->auditTrail,
+			$this->guard
 		);
 	}
 
@@ -161,6 +185,17 @@ class SettingsControllerTest extends TestCase {
 		$this->assertSame('["dave","erin","frank"]', $data[5]);
 	}
 
+	public function testDataForAGroupAdminNoneOfWhoseGroupsIsDelegated(): void {
+		// "specific groups" mode, and none of carol's groups is in the list: she can impersonate nobody
+		$this->loggedIn($this->user('carol'));
+		$this->policy->method('isAdmin')->willReturn(false);
+		$this->policy->method('isDelegatedGroupAdmin')->willReturn(true);
+		$this->policy->method('getImpersonableGroupIds')->willReturn([]);
+		$this->policy->method('isIncludeGroupsMode')->willReturn(true);
+		$this->policy->expects($this->never())->method('getAdminUidsInGroups');
+		$this->assertSame(['[]', 'false', 'false', false, false, '[]'], $this->controller->getDataForImpersonateApp()->getData());
+	}
+
 	public function testDataForNormalUserRevealsNothing(): void {
 		$this->loggedIn($this->user('bob'));
 		$this->policy->method('isAdmin')->willReturn(false);
@@ -178,6 +213,105 @@ class SettingsControllerTest extends TestCase {
 	public function testAppDisabled(): void {
 		$this->appEnabled = 'no';
 		$this->util->expects($this->never())->method('startImpersonation');
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
+	}
+
+	public static function notEnabledForEverybodyProvider(): array {
+		return [
+			// the platform stores a list of groups for an app that is enabled for some groups only
+			'enabled for groups' => ['["admin","helpdesk"]'],
+			'an unknown value' => ['true'],
+			'empty' => [''],
+		];
+	}
+
+	/**
+	 * The checks of the app only run where the app is loaded: an app enabled for some groups only
+	 * would not be loaded for the session of an impersonated user outside them.
+	 *
+	 * @dataProvider notEnabledForEverybodyProvider
+	 */
+	public function testAppThatIsNotEnabledForEverybody(string $enabled): void {
+		$this->appEnabled = $enabled;
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->logger->expects($this->once())->method('warning')->with($this->stringContains('not enabled for everybody'));
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
+	}
+
+	public function testNoStartInARequestTheGuardHasNotSeen(): void {
+		// the hook was not registered or not emitted, or the guard could not be built: it would
+		// not see the requests of the impersonation either
+		$this->guardActive = false;
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->logger->expects($this->once())->method('error')->with($this->stringContains('request guard of the app is not active'));
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
+	}
+
+	public static function csrfProvider(): array {
+		return [
+			// the platform asks a session request for the token itself; the app does it again
+			'session request' => [null, false],
+			// allow_start_with_credentials lets such a request through: the platform does not ask it for the token
+			'request with credentials' => ['Negotiate abc', true],
+		];
+	}
+
+	/**
+	 * @dataProvider csrfProvider
+	 */
+	public function testNoStartWithoutAValidCsrfToken(?string $authorization, bool $startWithCredentials): void {
+		$this->authorization = $authorization;
+		$this->csrfValid = false;
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('allowsStartWithCredentials')->willReturn($startWithCredentials);
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->policy->method('isAdmin')->willReturn(true);
+		$this->userManager->expects($this->never())->method('get');
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->logger->expects($this->once())->method('warning')->with(
+			$this->stringContains('the request has no valid CSRF token'),
+			$this->callback(function (array $context) {
+				return $context['impersonator'] === 'admin';
+			})
+		);
+		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
+	}
+
+	public function testNoStartWhileStartsAreBlocked(): void {
+		// occ impersonate:active --block (maintenance window)
+		$this->startsBlocked = true;
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->logger->expects($this->once())->method('warning')->with($this->stringContains('new impersonations are blocked'));
+		$response = $this->controller->impersonate('alice');
+		$this->assertError('cannotImpersonate', $response);
+		$this->assertSame(
+			'Can not impersonate. Please contact your server administrator to allow impersonation.',
+			$response->getData()['message']
+		);
+	}
+
+	public function testAUserWhoMayNotImpersonateLearnsNothingAboutTheBlock(): void {
+		$this->startsBlocked = true;
+		$this->loggedIn($this->user('bob'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(false);
+		$this->util->expects($this->never())->method('areStartsBlocked');
+		$response = $this->controller->impersonate('alice');
+		$this->assertError('cannotImpersonate', $response);
+		$this->assertSame('Can not impersonate', $response->getData()['message']);
+	}
+
+	public function testNoStartWhenTheBlockCanNotBeRead(): void {
+		$this->startsBlocked = new \RuntimeException('database down');
+		$this->loggedIn($this->user('admin'));
+		$this->policy->method('mayImpersonateAnyone')->willReturn(true);
+		$this->util->expects($this->never())->method('startImpersonation');
+		$this->logger->expects($this->once())->method('logException');
 		$this->assertError('cannotImpersonate', $this->controller->impersonate('alice'));
 	}
 
@@ -347,7 +481,8 @@ class SettingsControllerTest extends TestCase {
 		$this->userManager->method('get')->with('ALICE')->willReturn($alice);
 		$this->policy->method('check')->with($admin, $alice)->willReturn(null);
 		$this->util->expects($this->once())->method('startImpersonation')->with($alice, $admin);
-		$this->auditTrail->expects($this->once())->method('started')->with('admin', 'alice');
+		// the id of the record pairs the start with the end in audit apps
+		$this->auditTrail->expects($this->once())->method('started')->with('admin', 'alice', 'rrrrrrrrrrrrrrrr');
 		$response = $this->controller->impersonate('ALICE');
 		$this->assertSame(Http::STATUS_OK, $response->getStatus());
 		$this->assertSame([], $response->getData());

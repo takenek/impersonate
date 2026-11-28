@@ -62,18 +62,18 @@ ci: vendor build-dep js-templates
 build-dep: ## fetch all dependencies
 build-dep: node_modules
 
+# --ignore-scripts: no package of the build needs an install script, so none may run
 node_modules: package.json package-lock.json
-		$(NPM) ci --no-audit --no-fund --prefix=$(NODE_PREFIX) && touch $@
+		$(NPM) ci --ignore-scripts --no-audit --no-fund --prefix=$(NODE_PREFIX) && touch $@
 
 .PHONY: js-templates
 js-templates: ## build templates for frontend
 js-templates: $(addsuffix .js, $(template_src))
 
-# Installs and updates the composer dependencies.
+# Installs the composer dependencies as composer.lock has them (nothing is updated).
 .PHONY: composer
 composer:
 	composer install --prefer-dist
-	composer update --prefer-dist
 
 # Fetches the PHP and JS dependencies and compiles the JS. If no composer.json
 # is present, the composer step is skipped, if no package.json or js/package.json
@@ -121,6 +121,12 @@ build-src: ## Build source package
 		CHANGELOG.md \
 		templates \
 		build/$(appname)
+	@# regular files and directories only: a link would be extracted into the app folder of the installation
+	@if [ -n "$$(find build/$(appname) ! -type f ! -type d -print -quit)" ]; then \
+		echo "build/$(appname) contains something that is neither a regular file nor a directory:" >&2; \
+		find build/$(appname) ! -type f ! -type d >&2; \
+		exit 1; \
+	fi
 	rm -Rf build/$(appname)/js/templates/*.handlebars build/$(appname)/l10n/.tx
 ifneq (,$(SIGN_CMD))
 	$(SIGN_CMD) "$(CURDIR)/build/$(appname)"

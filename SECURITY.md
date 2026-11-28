@@ -35,14 +35,14 @@ as the tag, proves nothing.
 
 ```bash
 # the archive matches the checksum published with the release
-sha256sum -c impersonate-1.0.3.tar.gz.sha256
+sha256sum -c impersonate-1.0.4.tar.gz.sha256
 
 # the tag is signed by the release key
 git clone https://github.com/takenek/impersonate.git && cd impersonate
-git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag v1.0.3
+git -c gpg.ssh.allowedSignersFile=.github/release-signers verify-tag v1.0.4
 
 # the archive can be rebuilt from the tag (reproducible: same content, same checksum)
-git checkout v1.0.3 && make dist && cat build/impersonate-1.0.3.tar.gz.sha256
+git checkout v1.0.4 && make dist && cat build/impersonate-1.0.4.tar.gz.sha256
 ```
 
 CI builds the archive from the commit the verified tag names and never replaces an archive that is
@@ -75,6 +75,11 @@ of the session. The app is designed so that
    have a session token that belongs to the user. Instances where every request of a browser
    carries credentials (authentication by a proxy or by the web server) can turn these two checks
    off with the app config `allow_start_with_credentials`, and accept what they guard against. The
+   app checks the CSRF token of the start itself, whatever authenticated the request (ownCloud does
+   not ask a request with credentials for it). An impersonation starts only if the app is enabled
+   for everybody (only then does ownCloud load its checks for every request) and the request guard
+   of point 4 has checked the request, and never while new impersonations are blocked for
+   maintenance (`occ impersonate:active --block`). The
    user interface asks for confirmation and names the account; the account is the one the icon was
    created for, never the text shown in the row;
 2. **nothing of the impersonator leaks into the impersonated session** – the impersonator's login
@@ -87,8 +92,9 @@ of the session. The app is designed so that
    everything of the OAuth2 app (`/apps/oauth2/`), a login through the login form (`POST /login`,
    which accepts the id of a session as a password and would turn the impersonated session into a
    new one) and everything below the prefixes the operator adds (app config `forbidden_prefixes`). The request path is normalized (repeated slashes, URL encoding,
-   trailing slash) and compared without regard to letter case and to the entry point
-   (`index.php`, `ocs/v1.php`, `ocs/v2.php`); a request whose path cannot be determined is refused.
+   trailing slash, also with `.` and `..` segments resolved) and compared without regard to letter
+   case and to the entry point (`index.php`, `ocs/v1.php`, `ocs/v2.php`); a request whose path
+   cannot be determined is refused.
    This is a list, not a default-deny rule: an operation of ownCloud or of another installed app
    that issues a credential or changes how an account is recovered and is not on the list is not
    blocked – add its prefix. As a backstop, tokens of the user without a stored password that
@@ -104,9 +110,18 @@ of the session. The app is designed so that
    default), the impersonator's parked session is revoked, or the impersonator changes the password.
    The password is checked like core does, every `last_check_timeout` minutes, and only for
    impersonations that were started from a session with a stored login password; a session without
-   one (e.g. single sign-on) has nothing to re-check and is bounded by the maximum duration. If the
-   check itself fails (e.g. a user or group backend is down), the request is refused with HTTP 503
-   instead of being served without the check;
+   one (e.g. single sign-on) has nothing to re-check and is bounded by the maximum duration. The
+   request during which the impersonation ends is refused with HTTP 401 (a logout request,
+   `/logout`, is not), so that nothing of it depends on how ownCloud reads the identity after the
+   logout. If the check itself fails (e.g. a user or group backend is down), the request is refused
+   with HTTP 503 instead of being served without the check. While ownCloud hides the user of the
+   session (incognito mode, e.g. while an update is pending) the checks that need no user still
+   run: the record, the session token and the maximum duration. If the guard itself cannot be built
+   (e.g. after an update of ownCloud that changes something it relies on), every request of an
+   impersonated session is refused with HTTP 503; while an impersonation whose session token may
+   still be valid is recorded, every other request is refused with HTTP 503 too, because point 8
+   cannot be checked. An error is logged for each such request. `occ` and `cron.php` on the command
+   line are no HTTP requests and are not checked (so that `occ` keeps working);
 5. **only the user's own logout switches back** – a logout that core triggers for security reasons
    (revoked or invalid session, auth header mismatch, password reset) ends the session instead; the
    switch back requires the CSRF token of the logout link. A switch – in either direction – that
@@ -116,7 +131,10 @@ of the session. The app is designed so that
    revocable) in their session list; every start, every end and every refusal is logged at warning
    level with the canonical uids (and the remote address where a request causes it), and the events
    `user.afterimpersonate` and `user.afterimpersonatelogout` (with the arguments `impersonator`,
-   `targetUser` and, for the end, `reason`) are dispatched (consumed e.g. by audit apps). Every
+   `targetUser`, for the end `reason`, and `impersonation`: the id of the server-side record, the
+   same for the start and the end of one impersonation, no credential) are dispatched (consumed e.g.
+   by audit apps). Request paths and names of credentials that clients chose are logged without
+   control characters or line breaks. Every
    impersonation has a server-side record: one whose session just expires or is lost is ended,
    cleaned up (point 3) and reported by a background job. That happens when the job runs more than
    two minutes after the maximum duration has passed, or after the session token is gone – not at
@@ -125,18 +143,24 @@ of the session. The app is designed so that
    credential, so it also removes one the account owner created during the impersonation: an app
    password created from a session without a login password, or such a session itself (e.g. after
    single sign-on; a session or app password with a stored password is never touched). For each
-   removed credential the owner gets a notification (notifications app), a warning is logged and the
-   event `user.impersonate.credentialrevoked` is dispatched;
+   removed credential the owner gets a notification of its own (notifications app), a warning is
+   logged and the event `user.impersonate.credentialrevoked` is dispatched;
 8. **the session of an impersonation is no credential** – ownCloud accepts the id of a session as a
    token of its user: as the password of HTTP Basic authentication, as an authorization token and as
    the password of the login form, in any other request. Used that way, the session of an
    impersonation would act as the user outside the marked session and therefore outside points 3
    and 4. The record of every impersonation names its session token: a request that presents that
-   token outside the impersonated session (as its session, in an `Authorization` header or in a
-   request parameter) is refused with HTTP 401 and ends the impersonation (a request with more than
-   256 parameter values in the shape of a session id is not examined but refused with HTTP 503
-   while an impersonation is recorded; this refusal alone is logged at info level, so that an
-   anonymous client cannot fill the log). Request parameters are the query, a form and a JSON or
+   token outside the impersonated session (as its session, in an `Authorization` header – for HTTP
+   Basic the password, decoded both strictly and leniently – or in a request parameter) is refused
+   with HTTP 401 and ends the impersonation; a request of another impersonated session that presents
+   it is refused as well and ends both impersonations (a request with more than 256 parameter
+   values in the shape of a session id is not examined any further but refused with HTTP 503 while
+   an impersonation whose session token may still be valid is recorded; this refusal alone is
+   logged at info level, so that an anonymous client cannot fill the log). A record whose session
+   token is known to be revoked (it only waits for the cleanup of point 3) names no credential and
+   is not watched; a record whose token is not known to be revoked is kept until it is, however long
+   that takes (unless its user cannot be loaded for seven days after the end).
+   Request parameters are the query, a form and a JSON or
    form-encoded body, as ownCloud hands them to its controllers. The body of a WebDAV request
    (`remote.php`, `public.php`) and a `PUT` body of any other type are files and are not decoded:
    of such requests the query and a form that PHP itself has parsed are examined, and their
@@ -145,8 +169,8 @@ of the session. The app is designed so that
    the token it was started with anymore (e.g. its id changed) or whose record is gone is ended on
    its next request; and every end – by logout, by the checks of point 4 or by the background job –
    revokes the token by its id. Requests outside an impersonation are not affected otherwise; while
-   an impersonation is recorded, the credentials they present are looked up (and a request is
-   refused with HTTP 503 if that lookup fails).
+   an impersonation whose session token may still be valid is recorded, the credentials they
+   present are looked up (and a request is refused with HTTP 503 if that lookup fails).
 
 The impersonator's session token is parked under a random secret that exists only in the encrypted
 PHP session (never sent to the browser); it keeps its encrypted login password – if the session had
@@ -178,15 +202,32 @@ one – so the restored session stays password-bound (a later password change st
   impersonation at the same moment, the end event can be dispatched twice.
 * **The credential cleanup hits the owner's credentials too** (point 7) – those that appear between
   the start of an impersonation and the first run of the cleanup after its end (for a lost session:
-  the run of the background job that ends it). A cleanup that has to be retried does not reach
-  credentials that appeared later. The owner is told and can create them again. ownCloud lists at
-  most a limited number of tokens per user (1000): for an account with that many the cleanup may
-  miss one, and logs an error.
+  the run of the background job that ends it). A cleanup that has to be retried because a
+  revocation failed looks again at everything that appeared up to the retry; only once the tokens
+  could be listed after the end with nothing left to revoke are later credentials out of its
+  reach. The owner is told and can create them again. Without the list of the sessions of other
+  impersonations of the same user the cleanup revokes nothing but the session token and leaves the
+  rest to the background job. ownCloud lists at most a limited number of tokens per user (1000):
+  for an account with that many the cleanup may miss one, logs an error and stays open – it is
+  retried, shown by `occ impersonate:active` (whose `--end` returns 3 meanwhile) and given up with
+  an error seven days after the end. Such a cleanup keeps no upper bound (the list may have been
+  cut off anywhere), so until then its retries can also revoke passwordless sessions and app
+  passwords the owner creates later, each with a notification.
 * **The deny-list is a list** (point 3) – what other installed apps offer is only covered by the
   prefixes you add.
 * **Disabling the app** during an active impersonation leaves that session on the impersonated
-  identity until its next logout, without any of the controls above. End the active impersonations
-  first: `occ impersonate:active --end`.
+  identity until its next logout, without any of the controls above. Block new impersonations and
+  end the active ones first, and continue only on exit status 0:
+  `occ impersonate:active --end --block` (README section 2).
+* **Session locking** – start and return are sequences of session and token operations that rely on
+  the locking of the PHP session. A session handler without locking (Redis unless
+  `redis.session.locking_enabled` is switched on, Memcached with `memcached.sess_locking` off) can
+  let two parallel starts of the same session both succeed; the second impersonated session is
+  bounded by the maximum duration.
+* **Other authentication apps** – an "interactive session" is one without the markers that HTTP
+  Basic authentication and a login with a token leave (point 1). A session that another
+  authentication mechanism creates without such a marker counts as interactive; the CSRF token is
+  still required. Test impersonation with the authentication apps you use.
 * **Session values of other apps** – five identity-bound values are moved out of the session
   (point 2); whatever else ownCloud or other apps keep in the session stays, in both directions. The
   encryption state of the impersonator's session stays active during the impersonation (needed for
@@ -214,7 +255,9 @@ one – so the restored session stays password-bound (a later password change st
   `… is not part of the impersonated session …` and `Revoked …` /
   `Removed the URL signing key …` log lines, or consume the three events.
 * Keep the notifications app enabled, so that account owners learn about revoked credentials.
-* Before you disable or remove the app: `occ impersonate:active --end`.
+* Before you disable, update or remove the app: `occ impersonate:active --end --block`, continue
+  only on exit status 0, and run `occ impersonate:active --unblock` after an update or when you
+  enable the app again.
 * Use HTTPS, and keep `session_lifetime` / `session_keepalive` short.
 
 ## Security review
@@ -251,5 +294,22 @@ how a refused impersonation is shown behind nginx (its error pages hide the reas
 properties above changes. Before the release its changes were reviewed independently, and the
 security checks ran on SQLite with PHP's built-in server, on MariaDB behind Apache with mod_php and
 on PostgreSQL behind nginx with PHP-FPM ([CHANGELOG.md](CHANGELOG.md), 1.0.3).
+
+Version 1.0.4 is the result of a further full review of version 1.0.3 on 2026-11-28 (independent
+assessments, independent reviews of them, a consolidated report). It found no vulnerability of
+critical, high or medium risk, twelve of low risk and nineteen observations. The weaknesses lay
+mostly in failure paths, maintenance procedures and the release tooling: `occ impersonate:active --end`
+reported success while a cleanup was still open and nothing kept new impersonations from starting
+before maintenance; the request guard did not refuse in every branch in which it could not verify;
+the record of an impersonation could be dropped before its session token was known to be revoked;
+edge cases of the credential cleanup; the cost of the per-request check; an output buffer that
+could not be removed; the CSRF check with `allow_start_with_credentials`; the storage of the
+delegation policy; the release archive check; group-limited app states; and texts that clients
+choose. Every finding that can be fixed within the plugin is fixed in 1.0.4
+([CHANGELOG.md](CHANGELOG.md), 1.0.4) and tested with unit and end-to-end tests on SQLite with
+PHP's built-in server, on MariaDB behind Apache with mod_php and on PostgreSQL behind nginx with
+PHP-FPM.
+What remains is stated above: the deny-list is a list (point 3), and the behaviour of ownCloud
+itself, of other apps and of a concrete installation was not part of the review.
 
 `tests/e2e/security-checks.sh` checks the properties above on a live instance in CI.
